@@ -37,10 +37,16 @@ conversations with the listeners.
    - cuts go in silence only. Where you ran straight from a kept word into a
      flub with no gap, the cut is *tight*: it fades across the quietest point,
      and the app marks it so you know where to listen;
-   - each pause gets your own typical length for the punctuation there
-     (measured from the rest of the recording), made of the original silence
-     plus, if needed, real room tone from nearby; joins use equal-power
-     crossfades;
+   - **pacing is measured, not guessed.** From every pair of neighbouring
+     words you kept, Flubcutter learns how long *you* pause after a full
+     stop, after a comma and between other words (run-on words count as no
+     pause). A cut gets your usual pause for that spot, counting a breath
+     as part of it; a pause of your own that is long enough to sound like a
+     mistake is shortened to the long end of your normal range. Dead air is
+     the most obvious tell of an edit, so the finished audio is then scored
+     on its own: any pause outside your range is flagged and marked in the
+     player. Pauses are made of the original silence plus real room tone
+     from nearby, with equal-power crossfades;
    - **listen-back check**: after rendering, a few seconds around every cut
      are transcribed again. If the words meeting at a cut don't come out
      intact (a clipped word end, a leaked bit of a flub), that cut is rebuilt
@@ -48,7 +54,8 @@ conversations with the listeners.
 6. **Glitch reports**: play the cleaned chapter in the app and press **G**
    (or the *Glitch* button) right after anything that doesn't sound right.
    The cuts in the last 3 seconds are rebuilt more cautiously (wider safety
-   margins, more room tone, longer fades) and the spot replays at once. A cut
+   margins, more room tone, longer fades, a slightly tighter pause; never a
+   longer one) and the spot replays at once. A cut
    reported three times puts its flub back up for review: the cut itself is
    probably in the wrong place. Every report is logged, with a clip of the
    audio, in `work/<chapter>/joins.json` and `work/<chapter>/glitches/`, so
@@ -93,7 +100,7 @@ In the app:
    flub and plays it.
 5. **Render** the chapter and listen to the result in the *Cleaned chapter*
    player. Cuts are marked under the waveform (amber = tight, green =
-   rebuilt); `N` jumps to just before the next cut. Hear a blip? Press `G`.
+   rebuilt, purple = a pause outside your pacing); `N` jumps to just before the next cut. Hear a blip? Press `G`.
 
 There are also single-file commands for quick experiments:
 `flubcutter transcribe`, `align` and `cut`.

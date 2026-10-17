@@ -176,6 +176,7 @@ function renderPanel(playOpts = {}) {
       r ? h("span", { class: "small muted" }, `${fmtTime(r.input_seconds)} → ${fmtTime(r.output_seconds)} (${fmtTime(r.input_seconds - r.output_seconds)} removed)`) : null,
       joins.length ? h("span", { class: "small muted", title: "Tight cuts had no silence to cut in. Rebuilt joins were fixed after a glitch report or a failed listen-back check." },
         `${joins.length} cuts · ${tight} tight · ${rebuilt} rebuilt`) : null,
+      r?.rhythm ? paceBadge(r) : null,
       h("span", { class: "spacer" }),
       r ? h("a", { class: "btn", href: out, download: true }, "Download WAV") : null,
       h("button", { class: data.status.stage === "to render" ? "primary" : "", disabled: data.status.busy,
@@ -203,6 +204,15 @@ function renderPanel(playOpts = {}) {
       h("button", { id: "glitchbtn", class: "cut", title: "Rebuild the cuts in the last 3 seconds more carefully, then replay (G)", onclick: reportGlitch }, "⚠ Glitch", h("kbd", {}, "G"))));
   setTimeout(() => showOutput(playOpts), 0);
   return panel;
+}
+
+function paceBadge(r) {
+  const rh = r.rhythm, n = (r.pacing || []).length;
+  const tip = `Your pacing, measured from this recording: about ${rh["."].typ.toFixed(2)} s after a full stop, `
+    + `${rh[","].typ.toFixed(2)} s after a comma, ${rh.word.typ.toFixed(2)} s between other words. `
+    + `Every pause in the cleaned audio is checked against that range.`;
+  return h("span", { class: `tag ${n ? "pending" : "keep"}`, title: tip },
+    n ? `${n} pause${n > 1 ? "s" : ""} longer than you read` : "pacing ✓");
 }
 
 // ---------- cleaned-chapter player ----------
@@ -258,7 +268,12 @@ function drawJoins() {
     S.oregions.addRegion({ start: j.start, end: Math.max(j.end, j.start + 0.05), color: color[joinState(j)], drag: false, resize: false });
   }
   const el = document.getElementById("outticks");
-  el?.replaceChildren(...joins.map((j) => {
+  const pace = (S.data.render?.pacing || []).map((p) => h("span", {
+    class: "tick pace", style: `left:${(p.time / dur) * 100}%`,
+    title: `${fmtTime(p.time)} “${p.words[0]} … ${p.words[1]}”: ${p.gap.toFixed(2)} s pause, you usually take ${p.usual.toFixed(2)} s here`,
+    onclick: () => playFrom(p.time - 2.5),
+  }));
+  el?.replaceChildren(...pace, ...joins.map((j) => {
     const st = joinState(j);
     return h("span", {
       class: `tick join-${st}`, style: `left:${(j.start / dur) * 100}%`,

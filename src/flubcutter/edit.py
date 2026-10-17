@@ -41,10 +41,7 @@ XFADE = 0.02       # crossfade between pieces of room tone
 MIN_FILL = 0.06    # shortest room-tone fill between two pieces
 END_QUIET = 0.15   # a silence this long after a word means the word is over
 
-# Pause after the last kept word, by its punctuation, when the recording is
-# too short to measure the reader's own rhythm (see reader_pauses).
-PAUSE_AFTER = {".": 0.75, "!": 0.75, "?": 0.75, ":": 0.6, ";": 0.55, ",": 0.45, "-": 0.45}
-DEFAULT_PAUSE = 0.35
+PUNCT = {".": ".", "!": ".", "?": ".", ":": ",", ";": ",", ",": ",", "-": ","}
 
 # How cautiously a join is built. Level 0 is the default; each glitch report
 # (or failed listen-back check) on a join moves it one level up. Silence
@@ -55,13 +52,13 @@ DEFAULT_PAUSE = 0.35
 #   keep       most original audio kept beside the cut (None: as much as the
 #              pause needs); the rest of the pause is clean room tone
 #   hard_fade  fade length for a tight cut through sound
-#   extra      extra pause, seconds
+#   pace       pause length, as a fraction of the reader's usual pause
 #   shift      how much earlier a tight cut may land, to avoid catching the
 #              start of the word that was cut
 LEVELS = [
-    dict(margin=0.015, keep=None, hard_fade=0.035, extra=0.0, shift=0.0),
-    dict(margin=0.03, keep=0.12, hard_fade=0.05, extra=0.12, shift=0.03),
-    dict(margin=0.05, keep=0.06, hard_fade=0.07, extra=0.25, shift=0.05),
+    dict(margin=0.015, keep=None, hard_fade=0.035, pace=1.0, shift=0.0),
+    dict(margin=0.03, keep=0.12, hard_fade=0.05, pace=0.85, shift=0.03),
+    dict(margin=0.05, keep=0.06, hard_fade=0.07, pace=0.7, shift=0.05),
 ]
 QUIET_DB = 8.0     # silence: within this many dB of the recording's noise floor
 MIN_QUIET = 0.04   # shortest gap that counts as silence
@@ -80,8 +77,8 @@ def keep_set(alignment: dict, decisions: dict[str, str]) -> set[int]:
 def runs(words: list[dict], keep: set[int]) -> list[tuple[int, int]]:
     """Stretches of consecutive kept words, as (first, last) word indices.
 
-    A run ends where words were cut, where a recording part ends, or at a
-    pause long enough that it may need shortening.
+    A run ends where words were cut or a recording part ends. (Pauses that
+    are too long are found from the audio in render.)
     """
     order = sorted(keep)
     if not order:
@@ -90,7 +87,7 @@ def runs(words: list[dict], keep: set[int]) -> list[tuple[int, int]]:
     first = order[0]
     for a, b in zip(order, order[1:]):
         same_part = words[a]["part"] == words[b]["part"]
-        if same_part and b == a + 1 and words[b]["start"] - words[a]["end"] <= 0.8 * MAX_PAUSE:
+        if same_part and b == a + 1:
             continue
         out.append((first, a))
         first = b
@@ -268,40 +265,76 @@ def in_point(ac: Acoustics, word: dict, lo: float | None, level: int) -> dict:
     if found is not None:
         t = found * HOP + WIN
         start = (found - bwd[found] + 1) * HOP
-        return {"t": t, "avail": max(0.0, t - start - L["margin"]), "hard": False}
+        # "speech" is where the word itself starts; anything between t and
+        # speech is a breath, which counts as part of the pause.
+        return {"t": t, "avail": max(0.0, t - start - L["margin"]), "hard": False,
+                "speech": max(t, onset * HOP)}
     if onset * HOP <= L["margin"] or (lo is None and q[: onset].all()):
-        return {"t": onset * HOP, "avail": onset * HOP, "hard": False}
-    return {"t": ac.valley(word["start"] - 0.10, word["start"] + 0.03), "avail": 0.0, "hard": True}
+        return {"t": onset * HOP, "avail": onset * HOP, "hard": False, "speech": onset * HOP}
+    t = ac.valley(word["start"] - 0.10, word["start"] + 0.03)
+    return {"t": t, "avail": 0.0, "hard": True, "speech": t}
 
 
 def _punct(word: dict) -> str:
     w = word["word"].rstrip("\"'”’)]")
     p = w[-1:] if w else ""
-    return {"!": ".", "?": ".", ";": ",", ":": ",", "-": ","}.get(p, p) if p in PAUSE_AFTER else ""
+    return PUNCT.get(p, "")
 
 
-def reader_pauses(ac_for, words: list[dict], keep: set[int], sample: int = 150) -> dict[str, float]:
-    """How long this reader actually pauses after a full stop, a comma and
-    between other words, measured from the kept reading itself. A cut then
-    leaves a pause that sounds like the rest of the chapter."""
-    gaps = {".": [], ",": [], "": []}
-    for i in sorted(keep):
-        j = i + 1
-        if j not in keep or words[j]["part"] != words[i]["part"]:
-            continue
-        cls = _punct(words[i])
-        if len(gaps[cls]) >= sample:
-            continue
-        ac = ac_for(words[i]["part"])
-        a = out_point(ac, words[i], words[j]["start"], 0)
-        b = in_point(ac, words[j], words[i]["start"], 0)
-        if not (a["hard"] or b["hard"]):
-            gaps[cls].append(b["t"] - a["t"])
+def gap(a: dict, b: dict) -> float:
+    """Pause between the end of one word's sound and the start of the next
+    word itself (a breath in between counts as pause); 0 for run-on words."""
+    if a["hard"] or b["hard"]:
+        return 0.0
+    return max(0.0, b["speech"] - a["t"])
+
+
+# Used when a recording is too short to measure the reader's own pacing.
+DEFAULT_RHYTHM = {
+    ".": {"typ": 0.6, "long": 0.8, "max": 1.1},
+    ",": {"typ": 0.3, "long": 0.4, "max": 0.6},
+    "": {"typ": 0.05, "long": 0.12, "max": 0.35},
+}
+
+
+def rhythm_of(gaps: dict[str, list[float]]) -> dict[str, dict]:
+    """The reader's pacing per context, from measured gaps between kept words:
+    typ (median) is what a cut gets; long (90th percentile) is the long end
+    of normal; max is where a pause stops sounding like reading and starts
+    sounding like a mistake."""
     out = {}
-    for cls, dflt in ((".", PAUSE_AFTER["."]), (",", PAUSE_AFTER[","]), ("", DEFAULT_PAUSE)):
-        g = [x for x in gaps[cls] if 0.05 < x < 3.0]
-        out[cls] = float(np.clip(np.median(g), 0.2, MAX_PAUSE)) if len(g) >= 5 else dflt
+    for cls, dflt in DEFAULT_RHYTHM.items():
+        g = np.array([x for x in gaps.get(cls, []) if x < 3.0])
+        if len(g) < 8:
+            out[cls] = dict(dflt, n=int(len(g)))
+            continue
+        typ, p90, p97 = np.percentile(g, [50, 90, 97])
+        out[cls] = {"typ": float(min(typ, MAX_PAUSE)),
+                    "long": float(min(p90, MAX_PAUSE)),
+                    "max": float(min(max(p97, typ + 0.25), MAX_PAUSE)),
+                    "n": int(len(g))}
     return out
+
+
+def pacing(out: np.ndarray, spans: list[tuple[dict, float, float]], rhythm: dict) -> list[dict]:
+    """Pauses in the finished audio that fall outside the reader's own range.
+
+    spans: each kept word, in order, with its start and end in the output.
+    This measures the result itself, so it catches odd pauses wherever they
+    come from: at a cut or in the original reading.
+    """
+    ac = Acoustics(out)
+    flags = []
+    for (w1, s1, e1), (w2, s2, e2) in zip(spans, spans[1:]):
+        a = out_point(ac, {"word": w1["word"], "start": s1, "end": min(e1, s2)}, s2, 0)
+        b = in_point(ac, {"word": w2["word"], "start": s2, "end": e2}, s1, 0)
+        cls = _punct(w1)
+        g = gap(a, b)
+        if g > rhythm[cls]["max"] + 0.05:
+            flags.append({"time": round(a["t"], 2), "gap": round(g, 2),
+                          "usual": round(rhythm[cls]["typ"], 2),
+                          "words": [w1["word"], w2["word"]]})
+    return flags
 
 
 # ---------- render ----------
@@ -326,7 +359,26 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
         nxt = words[i + 1] if i + 1 < len(words) and words[i + 1]["part"] == w["part"] else None
         return prev, nxt
 
-    rhythm = reader_pauses(ac, words, keep)
+    # Measure the reader's pacing on every pair of kept neighbours, and split
+    # runs where a pause is too long to sound like reading.
+    measured, gaps = {}, {".": [], ",": [], "": []}
+    for first, last in rs:
+        a_c = ac(words[first]["part"])
+        for i in range(first, last):
+            a = out_point(a_c, words[i], words[i + 1]["start"], 0)
+            b = in_point(a_c, words[i + 1], words[i]["start"], 0)
+            measured[i] = gap(a, b)
+            gaps[_punct(words[i])].append(measured[i])
+    rhythm = rhythm_of(gaps)
+    split = []
+    for first, last in rs:
+        start = first
+        for i in range(first, last):
+            if measured[i] > rhythm[_punct(words[i])]["max"]:
+                split.append((start, i))
+                start = i + 1
+        split.append((start, last))
+    rs = split
     keys = [join_key(words, a[1], b[0]) for a, b in zip(rs, rs[1:])]
     lvl = [min(MAX_LEVEL, max(0, int(levels.get(k, 0)))) for k in keys]
 
@@ -356,11 +408,24 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
         wa, wb = words[rs[r][1]], words[rs[r + 1][0]]
         same = wa["part"] == wb["part"]
         consecutive = same and rs[r + 1][0] == rs[r][1] + 1
-        if consecutive:  # a long pause that needs shortening
-            want = min(MAX_PAUSE, max(B["t"] - A["t"], 0.0))
-        else:
-            want = rhythm[_punct(wa)]
-        want = min(MAX_PAUSE, want + L["extra"])
+        R = rhythm[_punct(wa)]
+        if consecutive:
+            # One of the reader's own pauses, too long to sound like reading:
+            # shorten it to the long end of normal, keeping some emphasis.
+            want = max(R["long"], 0.8 * R["max"])
+        else:  # a cut: the reader's usual pause here
+            want = R["typ"]
+        want = min(MAX_PAUSE, want * L["pace"])
+        # A breath before the next word is part of the pause. If it alone
+        # would make the pause too long, leave it out.
+        breath = max(0.0, B["speech"] - B["t"])
+        if breath > 0.05 and breath > want - MIN_FILL:
+            c = ac(wb["part"])
+            t = c.valley(B["speech"] - 0.04, B["speech"] + 0.005)
+            B = {"t": t, "avail": 0.0, "hard": True, "speech": t}
+            sides[r + 1] = (B, sides[r + 1][1])
+            breath = 0.0
+        want = max(0.0, want - breath)
         keep_a = A["avail"] if L["keep"] is None else min(A["avail"], L["keep"])
         keep_b = B["avail"] if L["keep"] is None else min(B["avail"], L["keep"])
         # Original silence from both sides, topped up with room tone; there is
@@ -371,7 +436,7 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
         t_ = min(keep_a, room - h_)
         tail[r], head[r + 1] = t_, h_
         fill[r] = max(MIN_FILL, want - t_ - h_)
-        pauses.append(want)
+        pauses.append(want + breath)
     head[0] = min(sides[0][0]["avail"], LEAD_IN)
     tail[-1] = min(sides[-1][1]["avail"], END_TAIL)
 
@@ -418,7 +483,7 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
         same = words[wa]["part"] == words[wb]["part"]
         kind = ("pause" if same and wb == wa + 1 else "cut") if same else "part"
         a_end = A["t"] + run_pos[r]
-        b_on = B["t"] + run_pos[r + 1]
+        b_on = B["speech"] + run_pos[r + 1]
         joins.append({
             "key": keys[r], "kind": kind, "level": lvl[r],
             "tight": bool(A["hard"] or B["hard"]),
@@ -430,8 +495,12 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
             "source": [{"part": words[wa]["part"], "t": round(A["t"], 3)},
                        {"part": words[wb]["part"], "t": round(B["t"], 3)}],
         })
-    return out, {"chunks": chunks, "joins": joins,
-                 "rhythm": {k or "word": round(v, 2) for k, v in rhythm.items()}}
+    spans = []
+    for r, (first, last) in enumerate(rs):
+        for i in range(first, last + 1):
+            spans.append((words[i], words[i]["start"] + run_pos[r], words[i]["end"] + run_pos[r]))
+    return out, {"chunks": chunks, "joins": joins, "pacing": pacing(out, spans, rhythm),
+                 "rhythm": {k or "word": {x: round(v, 2) for x, v in d.items()} for k, d in rhythm.items()}}
 
 
 def write_wav(samples: np.ndarray, out: Path) -> None:
