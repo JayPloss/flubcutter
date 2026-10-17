@@ -1,21 +1,21 @@
-"""Step 1: verbatim speech-to-text with word-level timestamps."""
+"""Step 1: verbatim speech-to-text with word-level timestamps.
+
+Uses NVIDIA Parakeet TDT 0.6B (via onnx-asr). Unlike Whisper, a transducer
+model emits what it hears frame by frame instead of "writing" the text like a
+language model, so it does not smooth away repeated phrases and false
+starts, which are exactly what flub detection needs.
+"""
 
 import json
+import math
 import subprocess
+from functools import cache
 from pathlib import Path
 
 import numpy as np
-from faster_whisper import WhisperModel
 
-SAMPLE_RATE = 16000  # what Whisper expects
-
-# Whisper tends to tidy up speech (dropping "um", repeats, false starts).
-# Priming it with a disfluent prompt nudges it toward a verbatim transcript,
-# which is exactly what flub detection needs.
-VERBATIM_PROMPT = (
-    "Umm, so, uh, she was, she was sitting by the... by her sister. "
-    "Hmm. Wait, no, let me, let me read that again."
-)
+SAMPLE_RATE = 16000
+MODEL = "nemo-parakeet-tdt-0.6b-v2"
 
 
 def load_audio(path: Path) -> np.ndarray:
@@ -28,35 +28,55 @@ def load_audio(path: Path) -> np.ndarray:
     return np.frombuffer(raw, dtype=np.float32)
 
 
-def transcribe(audio: Path, model_name: str = "large-v3-turbo") -> dict:
-    model = WhisperModel(model_name, device="cpu", compute_type="int8")
-    segments, info = model.transcribe(
-        load_audio(audio),
-        language="en",
-        word_timestamps=True,
-        initial_prompt=VERBATIM_PROMPT,
-        # Don't let earlier text bias later text; reduces "smoothing" of flubs.
-        condition_on_previous_text=False,
-        # Keep every sound, so pauses and yawns show up as gaps between words.
-        vad_filter=False,
-    )
+@cache
+def _recognizer():
+    import onnx_asr
 
+    model = onnx_asr.load_model(MODEL, quantization="int8")
+    vad = onnx_asr.load_vad("silero")
+    return model.with_vad(vad).with_timestamps()
+
+
+def _words(segment) -> list[dict]:
+    """Group a segment's subword tokens into words with absolute times."""
     words = []
-    for seg in segments:
-        for w in seg.words:
-            words.append(
-                {
-                    "word": w.word.strip(),
-                    "start": round(w.start, 3),
-                    "end": round(w.end, 3),
-                    "prob": round(w.probability, 3),
-                }
-            )
+    tokens, times, logprobs = segment.tokens, segment.timestamps, segment.logprobs
+    for k, tok in enumerate(tokens):
+        t = segment.start + times[k]
+        if not words or tok.startswith(" "):
+            words.append({"word": tok.strip(), "start": t, "logprobs": [logprobs[k]]})
+        else:
+            words[-1]["word"] += tok
+            words[-1]["logprobs"].append(logprobs[k])
+    # A word ends where the next one starts, or at the segment's end.
+    for k, w in enumerate(words):
+        w["end"] = words[k + 1]["start"] if k + 1 < len(words) else segment.end
+    out = []
+    for w in words:
+        if not any(c.isalnum() for c in w["word"]):
+            continue  # stray punctuation token
+        lp = w.pop("logprobs")
+        out.append({
+            "word": w["word"],
+            "start": round(w["start"], 3),
+            "end": round(max(w["end"], w["start"] + 0.05), 3),
+            "prob": round(math.exp(sum(lp) / len(lp)), 3),
+        })
+    return out
 
+
+def transcribe(audio: Path, progress=None) -> dict:
+    samples = load_audio(audio)
+    duration = len(samples) / SAMPLE_RATE
+    words = []
+    for seg in _recognizer().recognize(samples, sample_rate=SAMPLE_RATE):
+        words.extend(_words(seg))
+        if progress:
+            progress(min(seg.end / duration, 1.0))
     return {
         "audio": str(audio),
-        "model": model_name,
-        "duration": round(info.duration, 3),
+        "model": MODEL,
+        "duration": round(duration, 3),
         "words": words,
     }
 
