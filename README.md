@@ -33,3 +33,7 @@ material in the local `books/` and `recordings/` folders.
 ## Status
 
 Early planning.
+
+## License
+
+MIT. See [LICENSE](LICENSE). This covers the code only, not any book text or recordings.
