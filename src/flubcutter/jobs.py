@@ -102,9 +102,7 @@ class Jobs:
         ch = self.lib.chapter(self.lib.book(b), c)
         verdicts = judge.judge(todo, self.lib.chapter_words(b, ch),
                                self.lib.chapter_text(b, c), progress=progress)
-        review = self.lib.review(b, c)  # re-read: the user may have decided some meanwhile
-        review["ai"].update(verdicts)
-        self.lib.save_review(b, c, review)
+        self.lib.add_ai_verdicts(b, c, verdicts)
 
     def _process(self, b, c, progress):
         """Everything that needs no human: transcribe missing parts, align, judge."""

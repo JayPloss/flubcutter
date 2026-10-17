@@ -6,6 +6,62 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 
 
+def _running(url: str) -> bool:
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(url + "api/jobs", timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+def _open(url: str, app: bool = False) -> None:
+    import subprocess
+    import webbrowser
+
+    if app and shutil.which("omarchy-launch-webapp"):
+        subprocess.Popen(["omarchy-launch-webapp", url])
+    else:
+        webbrowser.open(url)
+
+
+def _install_desktop() -> None:
+    """Write a launcher entry and icon so Flubcutter shows up in the app menu."""
+    home = Path.home()
+    icon_dir = home / ".local/share/icons/hicolor/scalable/apps"
+    icon_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(Path(__file__).parent / "assets" / "flubcutter.svg", icon_dir / "flubcutter.svg")
+
+    # Desktop launches don't get the interactive shell's PATH, so the
+    # launcher script sets it up (mise shims provide uv and claude).
+    script = home / ".local/bin/flubcutter-app"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text(
+        "#!/bin/bash\n"
+        "# Open Flubcutter in its own window (starts the server if needed).\n"
+        'export PATH="$HOME/.local/share/mise/shims:$HOME/.local/bin:$PATH"\n'
+        f'cd "{REPO}" || exit 1\n'
+        'exec uv run --quiet flubcutter serve --app "$@" >>"$HOME/.cache/flubcutter.log" 2>&1\n'
+    )
+    script.chmod(0o755)
+
+    entry = home / ".local/share/applications/flubcutter.desktop"
+    entry.write_text(
+        "[Desktop Entry]\n"
+        "Version=1.0\n"
+        "Name=Flubcutter\n"
+        "Comment=Clean up read-aloud audiobook recordings\n"
+        f"Exec={script}\n"
+        "Terminal=false\n"
+        "Type=Application\n"
+        "Icon=flubcutter\n"
+        "Categories=AudioVideo;Audio;\n"
+        "StartupNotify=true\n"
+    )
+    print(f"installed {entry}\n          {script}\n          {icon_dir / 'flubcutter.svg'}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="flubcutter")
     parser.add_argument("--library", type=Path, help="library folder (default: ~/Flubcutter)")
@@ -14,6 +70,10 @@ def main() -> None:
     s = sub.add_parser("serve", help="run the web app")
     s.add_argument("--port", type=int, default=8642)
     s.add_argument("--open", action="store_true", help="open it in the browser")
+    s.add_argument("--app", action="store_true",
+                   help="open it in its own window; reuse the server if it is already running")
+
+    sub.add_parser("install-desktop", help="add Flubcutter to the desktop app launcher")
 
     d = sub.add_parser("demo", help="add a sample book (Alice) to the library")
     d.add_argument("audio", type=Path, nargs="?", help="a recording of samples/alice-ch1-opening.txt")
@@ -38,7 +98,11 @@ def main() -> None:
 
     if args.command == "serve":
         import threading
-        import webbrowser
+
+        url = f"http://127.0.0.1:{args.port}/"
+        if args.app and _running(url):
+            _open(url, app=True)
+            return
 
         import uvicorn
 
@@ -46,11 +110,13 @@ def main() -> None:
         from flubcutter.server import create_app
 
         lib = Library(args.library)
-        url = f"http://127.0.0.1:{args.port}/"
-        print(f"flubcutter: library {lib.root}\n            {url}")
-        if args.open:
-            threading.Timer(1.0, webbrowser.open, [url]).start()
+        print(f"flubcutter: library {lib.root}\n            {url}", flush=True)
+        if args.open or args.app:
+            threading.Timer(1.5, _open, [url, args.app]).start()
         uvicorn.run(create_app(lib), host="127.0.0.1", port=args.port, log_level="warning")
+
+    elif args.command == "install-desktop":
+        _install_desktop()
 
     elif args.command == "demo":
         from flubcutter.library import Library

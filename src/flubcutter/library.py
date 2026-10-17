@@ -16,9 +16,10 @@ import threading
 import time
 from pathlib import Path
 
-from flubcutter import align, edit
+from flubcutter import align, edit, judge
 
-AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".webm", ".caf", ".aiff", ".mp4"}
+AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".webm", ".caf", ".aiff", ".aif", ".mp4"}
+BROWSER_EXTS = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".webm", ".mp4"}
 CANDIDATES = ("restart", "filler", "extra")
 
 _lock = threading.RLock()
@@ -228,6 +229,20 @@ class Library:
     def part_audio(self, book_id: str, part: dict) -> Path:
         return self.book_dir(book_id) / part["audio"]
 
+    def playable_audio(self, book_id: str, chapter_id: str, part: dict) -> Path:
+        """The part's audio in a format the browser can play (cached copy if needed)."""
+        import subprocess
+
+        src = self.part_audio(book_id, part)
+        if src.suffix.lower() in BROWSER_EXTS:
+            return src
+        out = self.work_dir(book_id, chapter_id) / f"{part['id']}.preview.wav"
+        if not out.exists() or out.stat().st_mtime < src.stat().st_mtime:
+            out.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src),
+                            "-ac", "1", "-ar", "24000", str(out)], check=True)
+        return out
+
     def transcript_path(self, book_id: str, chapter_id: str, part_id: str) -> Path:
         return self.work_dir(book_id, chapter_id) / f"{part_id}.transcript.json"
 
@@ -276,6 +291,12 @@ class Library:
             self.save_review(book_id, chapter_id, r)
             return r
 
+    def add_ai_verdicts(self, book_id: str, chapter_id: str, verdicts: dict[str, dict]) -> None:
+        with _lock:
+            r = self.review(book_id, chapter_id)
+            r["ai"].update(verdicts)
+            self.save_review(book_id, chapter_id, r)
+
     @staticmethod
     def suggestion(event: dict, review: dict) -> dict:
         """What the tool proposes for a candidate, before any human decision."""
@@ -307,6 +328,7 @@ class Library:
         reviewed = sum(e["id"] in review["decisions"] for e in cands)
         judged = sum(e["id"] in review["ai"] or e["id"] in review["decisions"] for e in extras)
         out = self.output_path(book_id, ch["id"])
+        render = _read_json(self.work_dir(book_id, ch["id"]) / "render.json") if out.exists() else None
         review_file = self.work_dir(book_id, ch["id"]) / "review.json"
         rendered = out.exists() and (not review_file.exists()
                                      or out.stat().st_mtime >= review_file.stat().st_mtime)
@@ -319,7 +341,7 @@ class Library:
             stage = "to transcribe"
         elif not a:
             stage = "to align"
-        elif judged < len(extras):
+        elif judged < len(extras) and judge.available():
             stage = "to judge"
         elif reviewed < len(cands):
             stage = "to review"
@@ -340,6 +362,8 @@ class Library:
             "judged": judged,
             "reviewed": reviewed,
             "rendered": rendered,
+            "input_seconds": render["input_seconds"] if render else None,
+            "output_seconds": render["output_seconds"] if render else None,
         }
 
     # ---------- pipeline steps ----------

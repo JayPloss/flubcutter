@@ -107,6 +107,7 @@ function modal(title, body, { ok = "Save", onOk } = {}) {
 
 let lastJobsKey = "";
 let onJobsChanged = null;
+const shownErrors = new Set();
 
 async function pollJobs() {
   try {
@@ -125,12 +126,9 @@ async function pollJobs() {
       box.hidden = true;
     }
     for (const j of jobs) {
-      if (j.state === "error" && !j._shown) {
-        const key = `err-${j.id}`;
-        if (!sessionStorage.getItem(key)) {
-          sessionStorage.setItem(key, "1");
-          toast(`${j.kind} failed for ${j.chapter}: ${j.error}`, true);
-        }
+      if (j.state === "error" && !shownErrors.has(j.id)) {
+        shownErrors.add(j.id);
+        toast(`${j.kind} failed for ${j.chapter}: ${j.error}`, true);
       }
     }
     const key = jobs.map((j) => `${j.id}:${j.state}`).join(",");
@@ -162,6 +160,10 @@ async function renderDashboard(view) {
   const withAudio = all.filter((s) => s.parts > 0).length;
   const aligned = all.filter((s) => s.aligned).length;
   const done = all.filter((s) => s.stage === "done").length;
+  const rendered = all.filter((s) => s.input_seconds !== null);
+  const inSec = rendered.reduce((a, s) => a + s.input_seconds, 0);
+  const outSec = rendered.reduce((a, s) => a + s.output_seconds, 0);
+  const fmtDur = (s) => (s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`);
 
   const stat = (label, value, total, color) =>
     h("div", { class: "panel stat" },
@@ -209,7 +211,14 @@ async function renderDashboard(view) {
         stat("Parts transcribed", transcribed, parts, "blue"),
         stat("Chapters aligned", aligned, withAudio, "blue"),
         stat("Flubs reviewed", reviewed, cands, "amber"),
-        stat("Chapters finished", done, all.length, "green")) : null,
+        stat("Chapters finished", done, all.length, "green"),
+        h("div", { class: "panel stat" },
+          h("div", { class: "label" }, "Audio trimmed"),
+          h("div", { class: "value" }, rendered.length ? fmtDur(inSec - outSec) : "–",
+            rendered.length ? h("small", {}, ` of ${fmtDur(inSec)}`) : null),
+          h("div", { class: "small muted" }, rendered.length
+            ? `${Math.round((1 - outSec / inSec) * 100)}% removed across ${rendered.length} rendered chapter(s)`
+            : "Shows up once chapters are rendered"))) : null,
       lib.books.length ? h("div", { class: "legend" }, STAGES.map(([s, , color]) => h("span", {}, h("i", { style: `background:${color}` }), s))) : null,
       ...books,
       lib.books.length ? null : h("div", { class: "panel empty" },

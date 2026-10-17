@@ -240,7 +240,7 @@ def create_app(lib: Library) -> FastAPI:
     @app.get("/api/books/{b}/chapters/{c}/parts/{p}/audio")
     def part_audio(b: str, c: str, p: str):
         _, _, part = part_or_404(b, c, p)
-        return FileResponse(lib.part_audio(b, part))
+        return FileResponse(lib.playable_audio(b, c, part))
 
     @app.get("/api/books/{b}/chapters/{c}/output")
     def output_audio(b: str, c: str):
