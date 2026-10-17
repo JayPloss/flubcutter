@@ -161,10 +161,10 @@ def main() -> None:
                      for e in alignment["events"]}
         audio = edit.load(Path(transcript["audio"]))
         before = len(audio) / edit.RATE
-        chunks = edit.plan(words, edit.keep_set(alignment, decisions), [before])
-        cleaned = edit.render([audio], chunks)
+        cleaned, rep = edit.render([audio], words, edit.keep_set(alignment, decisions))
         out = args.out or Path("output") / f"{Path(transcript['audio']).stem}.clean.wav"
         edit.write_wav(cleaned, out)
         after = len(cleaned) / edit.RATE
-        print(f"{len(chunks)} chunks, {before:.1f}s -> {after:.1f}s "
+        tight = sum(j["tight"] for j in rep["joins"])
+        print(f"{len(rep['joins'])} joins ({tight} tight), {before:.1f}s -> {after:.1f}s "
               f"({before - after:.1f}s removed) -> {out}")

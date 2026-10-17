@@ -29,12 +29,18 @@ def load_audio(path: Path) -> np.ndarray:
 
 
 @cache
-def _recognizer():
+def _model():
     import onnx_asr
 
-    model = onnx_asr.load_model(MODEL, quantization="int8")
-    vad = onnx_asr.load_vad("silero")
-    return model.with_vad(vad).with_timestamps()
+    return onnx_asr.load_model(MODEL, quantization="int8")
+
+
+@cache
+def _recognizer():
+    """For whole recordings: voice activity detection splits them into segments."""
+    import onnx_asr
+
+    return _model().with_vad(onnx_asr.load_vad("silero")).with_timestamps()
 
 
 def _words(segment) -> list[dict]:
@@ -79,6 +85,12 @@ def transcribe(audio: Path, progress=None) -> dict:
         "duration": round(duration, 3),
         "words": words,
     }
+
+
+def words_in(samples: np.ndarray) -> list[str]:
+    """Words heard in a short 16 kHz clip (a few seconds; no segmentation,
+    which can drop speech that starts right at the edge of a clip)."""
+    return _model().recognize(samples, sample_rate=SAMPLE_RATE).split()
 
 
 def save(result: dict, out: Path) -> None:

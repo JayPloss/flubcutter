@@ -25,6 +25,8 @@ export function teardownReview() {
   S.player?.stop();
   S.ws?.destroy();
   S.audio?.pause();
+  S.ows?.destroy();
+  S.oaudio?.pause();
   S = null;
 }
 
@@ -158,25 +160,157 @@ function build() {
   showPart(S.part);
 }
 
-function renderPanel() {
+function renderPanel(playOpts = {}) {
   const { data } = S;
+  S.ows?.destroy();
+  S.ows = null;
+  S.oaudio?.pause();
   const r = data.render;
   const out = `/api/books/${S.bookId}/chapters/${S.chapterId}/output`;
-  return h("section", { class: "panel", id: "renderpanel" },
+  const joins = r?.joins || [];
+  const tight = joins.filter((j) => j.tight).length;
+  const rebuilt = joins.filter((j) => j.level > 0).length;
+  const panel = h("section", { class: "panel", id: "renderpanel" },
     h("div", { class: "panel-head" },
       h("h2", {}, "Cleaned chapter"),
       r ? h("span", { class: "small muted" }, `${fmtTime(r.input_seconds)} → ${fmtTime(r.output_seconds)} (${fmtTime(r.input_seconds - r.output_seconds)} removed)`) : null,
+      joins.length ? h("span", { class: "small muted", title: "Tight cuts had no silence to cut in. Rebuilt joins were fixed after a glitch report or a failed listen-back check." },
+        `${joins.length} cuts · ${tight} tight · ${rebuilt} rebuilt`) : null,
       h("span", { class: "spacer" }),
-      data.status.rendered ? h("a", { class: "btn", href: out, download: true }, "Download WAV") : null,
+      r ? h("a", { class: "btn", href: out, download: true }, "Download WAV") : null,
       h("button", { class: data.status.stage === "to render" ? "primary" : "", disabled: data.status.busy,
         onclick: () => guard(() => submitJob("render", S.bookId, S.chapterId)) },
-        data.status.rendered ? "Re-render" : "Render")),
-    h("div", { class: "panel-body" },
-      data.status.rendered
-        ? h("audio", { controls: true, preload: "none", src: `${out}?t=${r?.rendered || 0}`, style: "width:100%" })
-        : h("div", { class: "small muted" },
-            r ? "Decisions changed since the last render. Render again to hear them."
-              : "Render to produce the cleaned audio. Undecided flubs use the suggested decision.")));
+        r ? "Re-render" : "Render")));
+  if (!r) {
+    panel.append(h("div", { class: "panel-body small muted" },
+      "Render to produce the cleaned audio. Undecided flubs use the suggested decision."));
+    return panel;
+  }
+  if (!data.status.rendered) {
+    panel.append(h("div", { class: "stale small" },
+      "Decisions changed since this render. Re-render to hear them; until then this is the previous version."));
+  }
+  panel.append(
+    h("div", { class: "wavebox" }, h("div", { id: "outwave" }),
+      h("div", { id: "outticks", class: "ticks", title: "Every cut in the cleaned chapter. Click one to hear it." })),
+    h("div", { class: "transport" },
+      h("button", { id: "outplay", class: "primary", onclick: toggleOut }, "▶ Play"),
+      h("button", { class: "ghost", title: "Back 5 seconds", onclick: () => outSeek(-5) }, "↺ 5s"),
+      h("button", { class: "ghost", title: "Jump to just before the next cut and play (N)", onclick: nextJoin }, "Next cut ▸"),
+      h("span", { id: "outtime", class: "time mono small" }, "0:00.0"),
+      h("span", { class: "spacer" }),
+      h("span", { class: "small muted" }, "Hear a blip? Hit it right after."),
+      h("button", { id: "glitchbtn", class: "cut", title: "Rebuild the cuts in the last 3 seconds more carefully, then replay (G)", onclick: reportGlitch }, "⚠ Glitch", h("kbd", {}, "G"))));
+  setTimeout(() => showOutput(playOpts), 0);
+  return panel;
+}
+
+// ---------- cleaned-chapter player ----------
+
+async function showOutput({ seek = null, play = false } = {}) {
+  if (!S || !document.getElementById("outwave")) return;
+  S.ows?.destroy();
+  S.oaudio?.pause();
+  const base = `/api/books/${S.bookId}/chapters/${S.chapterId}/output`;
+  const stamp = S.data.render?.rendered || 0;
+  const peaks = await api(`${base}/peaks?t=${stamp}`);
+  if (!S || !document.getElementById("outwave")) return;
+  S.oaudio = new Audio();
+  S.oaudio.preload = "auto";
+  S.oaudio.src = `${base}?t=${stamp}`;
+  S.oregions = RegionsPlugin.create();
+  S.ows = WaveSurfer.create({
+    container: "#outwave", media: S.oaudio,
+    peaks: [peaks.peaks], duration: peaks.duration,
+    height: 90, normalize: true,
+    waveColor: css("--wave"), progressColor: css("--wave-progress"),
+    cursorColor: css("--accent"), cursorWidth: 2,
+    minPxPerSec: 1, autoScroll: true, dragToSeek: true,
+    plugins: [S.oregions],
+  });
+  S.ows.once("decode", () => {
+    drawJoins();
+    if (seek !== null) S.ows.setTime(seek);
+    if (play) { S.active = "out"; S.ows.play(); }
+  });
+  S.ows.on("timeupdate", (t) => {
+    const el = document.getElementById("outtime");
+    if (el) el.textContent = `${fmtTime(t)} / ${fmtTime(peaks.duration)}`;
+  });
+  S.ows.on("play", () => { S.active = "out"; S.player?.stop(); S.ws?.pause(); setOutBtn(true); });
+  S.ows.on("pause", () => setOutBtn(false));
+}
+
+function joinState(j) {
+  if (j.check && j.check.ok === false) return "bad";
+  if (j.level > 0) return "fixed";
+  return j.tight ? "tight" : "clean";
+}
+const JOIN_LABEL = { bad: "still sounds wrong", fixed: "rebuilt", tight: "tight cut (no silence)", clean: "clean" };
+
+function drawJoins() {
+  const joins = S?.data.render?.joins || [];
+  const dur = S?.ows?.getDuration();
+  if (!dur) return;
+  S.oregions.clearRegions();
+  const color = { bad: css("--cut-bg"), fixed: css("--keep-bg"), tight: css("--pending-bg"), clean: css("--gap-bg") };
+  for (const j of joins) {
+    S.oregions.addRegion({ start: j.start, end: Math.max(j.end, j.start + 0.05), color: color[joinState(j)], drag: false, resize: false });
+  }
+  const el = document.getElementById("outticks");
+  el?.replaceChildren(...joins.map((j) => {
+    const st = joinState(j);
+    return h("span", {
+      class: `tick join-${st}`, style: `left:${(j.start / dur) * 100}%`,
+      title: `${fmtTime(j.start)} “${j.words[0]} | ${j.words[1]}” — ${JOIN_LABEL[st]}${j.level ? ` (level ${j.level})` : ""}`,
+      onclick: () => playFrom(j.start - 2.5),
+    });
+  }));
+}
+
+function setOutBtn(playing) {
+  const b = document.getElementById("outplay");
+  if (b) b.textContent = playing ? "❚❚ Pause" : "▶ Play";
+}
+function toggleOut() { if (S?.ows) { S.active = "out"; S.ows.playPause(); } }
+function outSeek(d) { if (S?.ows) S.ows.setTime(Math.max(0, S.ows.getCurrentTime() + d)); }
+function playFrom(t) { if (!S?.ows) return; S.ows.setTime(Math.max(0, t)); S.active = "out"; S.ows.play(); }
+function nextJoin() {
+  const t = S?.ows?.getCurrentTime() ?? 0;
+  const j = (S.data.render?.joins || []).find((x) => x.start - 2.5 > t + 0.1);
+  if (j) playFrom(j.start - 2.5); else toast("No more cuts after this point");
+}
+
+async function reportGlitch() {
+  if (!S?.ows) return;
+  const t = S.ows.getCurrentTime();
+  S.ows.pause();
+  const btn = document.getElementById("glitchbtn");
+  if (btn) btn.disabled = true;
+  S.oregions.addRegion({ start: Math.max(0, t - 3), end: t, color: "rgba(229,72,77,0.35)", drag: false, resize: false,
+    content: h("span", {}, "glitch?") });
+  await guard(async () => {
+    const r = await api(`/api/books/${S.bookId}/chapters/${S.chapterId}/glitch`, { json: { time: t } });
+    S.data.render = r.render;
+    if (r.reopened.length) {
+      toast("That cut still glitched at the most careful setting, so its flub is back in “To review”. Listen to it there.");
+      const view = S.view, b = S.bookId, c = S.chapterId;
+      teardownReview();
+      await renderReview(view, b, c);
+      return;
+    }
+    if (!r.fixed.length) {
+      toast(r.maxed.length
+        ? "That cut is already at the most careful setting. Logged it, with the audio, for a closer look."
+        : "No cut within 3 s of there, so that sound is in the original recording. Logged it.");
+      drawJoins();
+      return;
+    }
+    const j = r.fixed[0];
+    toast(`Rebuilt the cut “${j.words[0]} | ${j.words[1]}” more carefully (level ${j.level}). Replaying…`);
+    document.getElementById("renderpanel")?.replaceWith(renderPanel({ seek: r.replay, play: true }));
+  });
+  if (btn) btn.disabled = false;
 }
 
 function renderProgress() {
@@ -234,7 +368,7 @@ async function showPart(k) {
     if (el) el.textContent = `${fmtTime(t)} / ${fmtTime(peaks.duration)}`;
     highlightWord(t);
   });
-  S.ws.on("play", () => setPlayBtn(true));
+  S.ws.on("play", () => { S.active = "src"; S.ows?.pause(); setPlayBtn(true); });
   S.ws.on("pause", () => setPlayBtn(false));
   S.ws.on("interaction", () => S.player.stop());
   S.regions.on("region-clicked", (region, e) => {
@@ -338,6 +472,8 @@ function setPlayBtn(playing) {
 
 function togglePlay() {
   if (!S?.ws) return;
+  S.active = "src";
+  S.ows?.pause();
   S.player.stop();
   S.ws.playPause();
 }
@@ -422,7 +558,9 @@ function onKey(ev) {
   if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
   const e = S.sel;
   const keys = {
-    " ": () => togglePlay(),
+    " ": () => (S.active === "out" ? toggleOut() : togglePlay()),
+    g: () => reportGlitch(),
+    n: () => nextJoin(),
     Enter: () => (ev.shiftKey ? playOriginal(e) : playCut(e)),
     p: () => playCut(e),
     o: () => playOriginal(e),
@@ -470,6 +608,7 @@ function renderList() {
     h("div", { class: "meta" },
       decisionTag(e),
       h("span", { class: "tag type" }, TYPE_LABEL[e.type] || e.type),
+      e.flag ? h("span", { class: "tag cut", title: e.flag }, "glitch") : null,
       h("span", { class: "spacer" }),
       h("span", { class: "mono" }, `${S.data.parts.length > 1 ? `P${e.part + 1} ` : ""}${fmtTime(e.start)}`)),
     h("div", { class: "said" }, `“${e.text}”`),
@@ -518,7 +657,8 @@ function renderDetail() {
         h("span", {}, h("kbd", {}, "P"), " play with cut"), h("span", {}, h("kbd", {}, "O"), " original"),
         h("span", {}, h("kbd", {}, "X"), " cut"), h("span", {}, h("kbd", {}, "K"), " keep"),
         h("span", {}, h("kbd", {}, "←"), h("kbd", {}, "→"), " prev/next"), h("span", {}, h("kbd", {}, "Space"), " play/pause"),
-        h("span", {}, h("kbd", {}, "⌫"), " undo decision"))));
+        h("span", {}, h("kbd", {}, "⌫"), " undo decision"),
+        h("span", {}, h("kbd", {}, "G"), " glitch in cleaned audio"), h("span", {}, h("kbd", {}, "N"), " next cut"))));
 }
 
 // ---------- transcript ----------

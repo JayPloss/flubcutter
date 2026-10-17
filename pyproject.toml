@@ -1,6 +1,6 @@
 [project]
 name = "flubcutter"
-version = "0.1.0"
+version = "0.2.0"
 description = "Clean up home-recorded read-aloud audiobooks using the book text as ground truth"
 readme = "README.md"
 license = "MIT"

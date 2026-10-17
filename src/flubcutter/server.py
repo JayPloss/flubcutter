@@ -4,10 +4,10 @@ import shutil
 from pathlib import Path
 
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from flubcutter import importers, judge
+from flubcutter import __version__, importers, judge
 from flubcutter.align import book_context
 from flubcutter.jobs import Jobs
 from flubcutter.library import AUDIO_EXTS, CANDIDATES, Library
@@ -16,7 +16,7 @@ STATIC = Path(__file__).parent / "static"
 
 
 def create_app(lib: Library) -> FastAPI:
-    app = FastAPI(title="flubcutter")
+    app = FastAPI(title="Flubcutter", version=__version__)
     jobs = Jobs(lib)
 
     def book_or_404(b):
@@ -53,7 +53,8 @@ def create_app(lib: Library) -> FastAPI:
                 chapters.append({"id": ch["id"], "title": ch["title"], "status": st})
             books.append({"id": b, "title": book["title"], "author": book.get("author", ""),
                           "chapters": chapters})
-        return {"root": str(lib.root), "books": books, "judge": judge.available()}
+        return {"root": str(lib.root), "books": books, "judge": judge.available(),
+                "version": __version__}
 
     @app.get("/api/jobs")
     def list_jobs():
@@ -204,6 +205,7 @@ def create_app(lib: Library) -> FastAPI:
                     e["candidate"] = True
                     e["suggestion"] = lib.suggestion(e, review)
                     e["decision"] = review["decisions"].get(e["id"])
+                    e["flag"] = review.get("flagged", {}).get(e["id"])
                     before, after = book_context(text, e["book_index"], 25, 25)
                     e["context"] = {"book_before": before, "book_after": after}
                 events.append(e)
@@ -215,11 +217,8 @@ def create_app(lib: Library) -> FastAPI:
             parts.append({**p, "index": k, "transcribed": t is not None,
                           "duration": t["duration"] if t else None,
                           "words": [dict(w, i=i) for i, w in enumerate(words) if w["part"] == k]})
-        render = None
-        rp = lib.work_dir(b, c) / "render.json"
-        if rp.exists():
-            import json
-            render = json.loads(rp.read_text())
+        render = lib.render_info(b, c)
+        if render:
             render.pop("chunks", None)
         return {"book": {"id": b, "title": book["title"]}, "chapter": {"id": c, "title": ch["title"]},
                 "text": text, "parts": parts, "events": events,
@@ -250,11 +249,29 @@ def create_app(lib: Library) -> FastAPI:
             raise HTTPException(404, "not rendered yet")
         return FileResponse(out, filename=f"{b}-{c}.wav")
 
+    @app.get("/api/books/{b}/chapters/{c}/output/peaks")
+    def output_peaks(b: str, c: str):
+        chapter_or_404(b, c)
+        if not lib.output_path(b, c).exists():
+            raise HTTPException(404, "not rendered yet")
+        return JSONResponse(lib.output_peaks(b, c))
+
+    @app.post("/api/books/{b}/chapters/{c}/glitch")
+    def glitch(b: str, c: str, body: dict = Body(...)):
+        chapter_or_404(b, c)
+        try:
+            r = lib.report_glitch(b, c, float(body["time"]))
+        except RuntimeError as e:
+            raise HTTPException(409, str(e))
+        r["render"].pop("chunks", None)
+        return r
+
     # ---------- the app ----------
 
     @app.get("/")
     def index():
-        return FileResponse(STATIC / "index.html")
+        page = (STATIC / "index.html").read_text().replace("{{version}}", __version__)
+        return HTMLResponse(page, headers={"Cache-Control": "no-cache"})
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app

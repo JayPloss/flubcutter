@@ -28,8 +28,31 @@ conversations with the listeners.
 4. **Review**: in the web app you see the waveform with every flub
    highlighted, hear each one with pre-roll and post-roll ("play with cut" vs
    "play original"), and approve or reject it, mostly with the keyboard.
-5. **Render**: the cuts are applied with room-tone pauses capped at 1.2 s,
-   cut points snapped to the quietest nearby 10 ms, and short crossfades.
+5. **Render**: every cut is placed by measuring the audio rather than
+   trusting the word timestamps (which are only good to ~80 ms):
+   - the real start and end of each kept word come from a 5 ms loudness
+     envelope, in both the full band and the hiss band (so soft endings like
+     the "s" in "conversations" aren't clipped), against the recording's own
+     noise floor;
+   - cuts go in silence only. Where you ran straight from a kept word into a
+     flub with no gap, the cut is *tight*: it fades across the quietest point,
+     and the app marks it so you know where to listen;
+   - each pause gets your own typical length for the punctuation there
+     (measured from the rest of the recording), made of the original silence
+     plus, if needed, real room tone from nearby; joins use equal-power
+     crossfades;
+   - **listen-back check**: after rendering, a few seconds around every cut
+     are transcribed again. If the words meeting at a cut don't come out
+     intact (a clipped word end, a leaked bit of a flub), that cut is rebuilt
+     more cautiously and checked again.
+6. **Glitch reports**: play the cleaned chapter in the app and press **G**
+   (or the *Glitch* button) right after anything that doesn't sound right.
+   The cuts in the last 3 seconds are rebuilt more cautiously (wider safety
+   margins, more room tone, longer fades) and the spot replays at once. A cut
+   reported three times puts its flub back up for review: the cut itself is
+   probably in the wrong place. Every report is logged, with a clip of the
+   audio, in `work/<chapter>/joins.json` and `work/<chapter>/glitches/`, so
+   the defaults can be tuned from real examples.
 
 ## Using it
 
@@ -51,7 +74,8 @@ The library lives in `~/Flubcutter`, or set `FLUBCUTTER_LIBRARY` /
     book.json            chapters and their recording parts, in order
     text/<chapter>.txt   book text per chapter
     audio/               your recordings (drop files here or upload in the app)
-    work/<chapter>/      transcripts, alignment, review decisions
+    work/<chapter>/      transcripts, alignment, review decisions, render
+                         report, glitch reports (joins.json, glitches/)
     output/<chapter>.wav cleaned chapters
 ```
 
@@ -67,7 +91,9 @@ In the app:
    original, `X` cut, `K` keep, `←`/`→` previous/next, `Space` play/pause,
    `Backspace` undo. With auto-advance on, each decision jumps to the next
    flub and plays it.
-5. **Render** the chapter and listen to the result.
+5. **Render** the chapter and listen to the result in the *Cleaned chapter*
+   player. Cuts are marked under the waveform (amber = tight, green =
+   rebuilt); `N` jumps to just before the next cut. Hear a blip? Press `G`.
 
 There are also single-file commands for quick experiments:
 `flubcutter transcribe`, `align` and `cut`.

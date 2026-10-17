@@ -84,7 +84,7 @@ class Jobs:
         elif job["kind"] == "judge":
             self._judge(b, c, progress)
         elif job["kind"] == "render":
-            lib.run_render(b, c)
+            lib.run_render(b, c, progress=progress)
         elif job["kind"] == "process":
             self._process(b, c, progress)
 
