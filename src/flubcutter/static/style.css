@@ -171,6 +171,12 @@ td.prog .bar { margin-top: 4px; }
 #wave ::part(region) { border-radius: 2px; overflow: hidden; }
 #wave ::part(region-content) { font-size: 11px; padding: 2px 4px; color: var(--text); font-weight: 600; white-space: nowrap; overflow: hidden; max-width: 100%; }
 #minimap { margin-top: 2px; }
+.ticks { position: relative; height: 14px; margin-top: 3px; border-radius: 4px; background: var(--panel-2); }
+.tick { position: absolute; top: 2px; width: 4px; height: 10px; margin-left: -2px; border-radius: 2px; cursor: pointer; background: var(--pending); }
+.tick.cut { background: var(--cut); }
+.tick.keep { background: var(--keep); }
+.tick.sel { top: 0; height: 14px; width: 6px; margin-left: -3px; outline: 2px solid var(--focus); }
+.tick:hover { transform: scaleY(1.3); }
 .tabs { display: flex; gap: 4px; }
 .tabs button { border-radius: 8px 8px 0 0; border-bottom: 0; }
 .tabs button.on { background: var(--panel-2); box-shadow: inset 0 -3px 0 var(--accent); }

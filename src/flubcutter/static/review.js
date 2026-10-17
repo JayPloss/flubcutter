@@ -117,7 +117,8 @@ function build() {
   left.append(
     h("section", { class: "panel" },
       tabs ? h("div", { style: "padding:8px 12px 0" }, tabs) : null,
-      h("div", { class: "wavebox" }, h("div", { id: "wave" }), h("div", { id: "minimap" })),
+      h("div", { class: "wavebox" }, h("div", { id: "wave" }), h("div", { id: "minimap" }),
+        h("div", { id: "ticks", class: "ticks", title: "Every flub in this part. Click one to jump to it." })),
       h("div", { class: "transport" },
         h("button", { id: "playbtn", class: "primary", onclick: togglePlay }, "▶ Play"),
         h("span", { id: "time", class: "time mono small" }, "0:00.0"),
@@ -262,13 +263,32 @@ function drawRegions() {
       drag: false, resize: false, content });
   }
   if (S.sel && S.sel.part === S.part) zoomTo(S.sel);
+  renderTicks();
 }
 
 function updateRegion(e) {
+  renderTicks();
   const r = S.regions?.getRegions().find((x) => x.id === e.id);
   if (!r) return;
   const st = regionStyle(e);
   r.setOptions({ color: st.color, content: st.label ? h("span", {}, st.label) : undefined });
+}
+
+// A strip under the minimap with one tick per flub, so you can see where
+// they cluster in a long chapter and jump straight to one.
+function renderTicks() {
+  const el = document.getElementById("ticks");
+  const dur = S?.ws?.getDuration();
+  if (!el || !dur) return;
+  el.replaceChildren(...S.cands.filter((e) => e.part === S.part).map((e) => {
+    const state = e.decision ? effective(e) : "pending";
+    return h("span", {
+      class: `tick ${state}${e === S.sel ? " sel" : ""}`,
+      style: `left:${(e.start / dur) * 100}%`,
+      title: `${fmtTime(e.start)} ${TYPE_LABEL[e.type] || e.type}: “${e.text}”`,
+      onclick: () => select(e),
+    });
+  }));
 }
 
 function zoomTo(e) {
@@ -347,6 +367,7 @@ async function select(e, { play = S.autoplay, zoom = true } = {}) {
   }
   renderList();
   renderDetail();
+  renderTicks();
   document.querySelector(`.cand[data-id="${CSS.escape(e.id)}"]`)?.scrollIntoView({ block: "nearest" });
   if (play) setTimeout(() => playCut(e), e.part !== S.part ? 400 : 0);
 }
