@@ -1,0 +1,40 @@
+# --- Copyrighted / personal material: never commit ---
+# Book text and audio recordings stay local only.
+books/
+recordings/
+output/
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.flac
+*.ogg
+*.opus
+*.epub
+*.mobi
+*.azw3
+*.pdf
+
+# --- Generated working files (may contain transcribed book text) ---
+work/
+*.transcript.json
+*.alignment.json
+
+# --- Secrets ---
+.env
+.env.*
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
