@@ -110,10 +110,14 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "faster-whisper" },
+    { name = "numpy" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "faster-whisper", specifier = ">=1.1" }]
+requires-dist = [
+    { name = "faster-whisper", specifier = ">=1.1" },
+    { name = "numpy", specifier = ">=2.5.4" },
+]
 
 [[package]]
 name = "fsspec"

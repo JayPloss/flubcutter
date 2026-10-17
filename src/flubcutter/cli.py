@@ -16,6 +16,13 @@ def main() -> None:
     a.add_argument("book", type=Path, help="plain-text file of the passage that was read")
     a.add_argument("--out", type=Path, help="default: work/<audio name>.alignment.json")
 
+    c = sub.add_parser("cut", help="render cleaned audio from a transcript + alignment")
+    c.add_argument("transcript", type=Path)
+    c.add_argument("alignment", type=Path)
+    c.add_argument("--cut-extras", action="store_true",
+                   help="also cut unexplained extra speech (default: keep it)")
+    c.add_argument("--out", type=Path, help="default: output/<audio name>.clean.wav")
+
     args = parser.parse_args()
 
     if args.command == "transcribe":
@@ -38,3 +45,19 @@ def main() -> None:
         save(result, out)
         print(report(result))
         print(f"\n-> {out}")
+
+    elif args.command == "cut":
+        import json
+
+        from flubcutter.edit import RATE, load, plan, render, write_wav
+
+        transcript = json.loads(args.transcript.read_text())
+        alignment = json.loads(args.alignment.read_text())
+        chunks = plan(transcript, alignment, keep_extras=not args.cut_extras)
+        audio = load(Path(transcript["audio"]))
+        cleaned = render(audio, chunks)
+        out = args.out or Path("output") / f"{Path(transcript['audio']).stem}.clean.wav"
+        write_wav(cleaned, out)
+        before, after = len(audio) / RATE, len(cleaned) / RATE
+        print(f"{len(chunks)} chunks, {before:.1f}s -> {after:.1f}s "
+              f"({before - after:.1f}s removed) -> {out}")
