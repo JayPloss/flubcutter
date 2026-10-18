@@ -37,6 +37,69 @@ def normalize(text: str) -> list[str]:
     return [w for w in (re.sub(r"[^a-z0-9']", "", t).strip("'") for t in text.split()) if w]
 
 
+# Where the book itself pauses, after a word: a paragraph end beats a
+# sentence end beats the edge of an aside beats a clause end. Used to pace
+# the cleaned audio. An aside -- in brackets or between dashes, like this
+# one -- is read with a little pause going in and coming out.
+BREAK_RANK = {"": 0, ",": 1, "(": 2, ".": 3, "¶": 4}
+_SENTENCE_END = ".!?…"
+_CLAUSE_END = ",;:-"
+_DASH = re.compile(r"(—|–|--+)")
+
+
+def book_breaks(book_text: str) -> list[str]:
+    """For each word of normalize(book_text): "¶" if it ends a paragraph, "."
+    a sentence, "(" the edge of an aside (the word before it opens, or its
+    last word), "," a clause, else "". Paragraphs are separated by blank
+    lines (one per line if the text has no blank lines at all)."""
+    sep = r"\n\s*\n" if re.search(r"\n\s*\n", book_text.strip()) else r"\n"
+    out = []
+    for para in re.split(sep, book_text):
+        start = len(out)
+
+        def mark(cls):  # the last word so far pauses at least this much
+            if len(out) > start and BREAK_RANK[cls] > BREAK_RANK[out[-1]]:
+                out[-1] = cls
+
+        for tok in para.split():
+            for piece in _DASH.split(tok):  # "think—" "—yes" "late—but"
+                if _DASH.fullmatch(piece):
+                    mark("(")
+                    continue
+                if piece.lstrip("\"'“‘").startswith(("(", "[")):
+                    mark("(")
+                n = len(normalize(piece))
+                tail = re.search(r"[^\w]*$", piece).group()  # "stupid)," -> "),"
+                cls = ("." if any(ch in _SENTENCE_END for ch in tail)
+                       else "(" if any(ch in ")]" for ch in tail)
+                       else "," if any(ch in _CLAUSE_END for ch in tail) else "")
+                if n:
+                    out.extend([""] * n)
+                mark(cls)  # (punctuation standing on its own marks the word before)
+        if len(out) > start:
+            out[-1] = "¶"
+    return out
+
+
+def canon(word: str) -> str:
+    """A normalized word with spelling variants folded together, for matching:
+    "labelled" = "labeled", "colour" = "color", "realise" = "realize"."""
+    w = re.sub(r"(.)\1+", r"\1", word)
+    w = re.sub(r"our(s?)$", r"or\1", w)
+    return re.sub(r"is(e|es|ed|ing)$", r"iz\1", w)
+
+
+def compounds(book_text: str) -> dict[str, list[str]]:
+    """Hyphenated book words, closed up: {"bookshelves": ["book", "shelves"]}.
+    The recogniser may write "book-shelves" as one word or as two."""
+    out = {}
+    for tok in re.findall(r"[A-Za-z']+(?:-[A-Za-z']+)+", book_text):
+        parts = normalize(tok)
+        if len(parts) > 1:
+            out[canon("".join(parts))] = parts
+    return out
+
+
 def _dp_align(book: list[int], spoken: list[int]) -> list[tuple[str, int | None, int | None]]:
     """Edit-distance alignment; ops are (kind, book_index, spoken_index)."""
     n, m = len(book), len(spoken)
@@ -116,19 +179,56 @@ def _anchors(book: list[int], spoken: list[int]) -> list[tuple[int, int]]:
     return splits
 
 
+def _rescue_strays(ops: list[tuple[str, int | None, int | None]], spoken: list[int],
+                   longest: int = 3) -> list[tuple[str, int | None, int | None]]:
+    """Last-take-wins can pick a common word out of the middle of extra
+    speech: book "fell past it. Well", spoken "fell past it. So I'm making a
+    recording for it ... Well" keeps the second "it". A short island of
+    matched words with extra speech on both sides goes back to the same
+    words right after the previous kept word, when those were left over.
+    (A restart is not an island: its words run on into the rest of the take,
+    or into a retry of the words that follow.)"""
+    kind_of = {s: k for k, (kind, _, s) in enumerate(ops) if s is not None}
+    matched = lambda s: s in kind_of and ops[kind_of[s]][0] in (MATCH, SUB)
+    s = 0
+    while s < len(spoken):
+        if not matched(s) or (s > 0 and matched(s - 1)):
+            s += 1
+            continue
+        end = s
+        while end + 1 < len(spoken) and matched(end + 1):
+            end += 1
+        n = end - s + 1
+        prev = next((p for p in range(s - 1, -1, -1) if matched(p)), None)
+        nxt = next((p for p in range(end + 1, len(spoken)) if matched(p)), None)
+        # A take that runs into a retry of what comes next is real reading.
+        runs_on = nxt is not None and spoken[end + 1] == spoken[nxt]
+        if (n <= longest and not runs_on and s > 0 and end + 1 < len(spoken) and prev is not None
+                and prev + n < s and spoken[prev + 1:prev + 1 + n] == spoken[s:end + 1]
+                and not any(matched(x) for x in range(prev + 1, prev + 1 + n))
+                and all(ops[kind_of[x]][0] == MATCH for x in range(s, end + 1))
+                and all(op[0] == EXTRA for op in ops[kind_of[prev] + 1:kind_of[s]])):
+            for i in range(n):
+                k_new, k_old = kind_of[prev + 1 + i], kind_of[s + i]
+                ops[k_new] = (MATCH, ops[k_old][1], prev + 1 + i)
+                ops[k_old] = (EXTRA, None, s + i)
+        s = end + 1
+    return ops
+
+
 def align_words(book: list[str], spoken: list[str]) -> list[tuple[str, int | None, int | None]]:
     vocab: dict[str, int] = {}
-    b = [vocab.setdefault(w, len(vocab)) for w in book]
-    s = [vocab.setdefault(w, len(vocab)) for w in spoken]
+    b = [vocab.setdefault(canon(w), len(vocab)) for w in book]
+    s = [vocab.setdefault(canon(w), len(vocab)) for w in spoken]
     if (len(b) + 1) * (len(s) + 1) <= MAX_CELLS:
-        return _dp_align(b, s)
+        return _rescue_strays(_dp_align(b, s), s)
 
     ops = []
     bounds = [(0, 0)] + _anchors(b, s) + [(len(b), len(s))]
     for (i0, j0), (i1, j1) in zip(bounds, bounds[1:]):
         for kind, bi, sj in _dp_align(b[i0:i1], s[j0:j1]):
             ops.append((kind, None if bi is None else bi + i0, None if sj is None else sj + j0))
-    return ops
+    return _rescue_strays(ops, s)
 
 
 def _overlap(extra: list[str], text: list[str]) -> float:
@@ -140,17 +240,30 @@ def _overlap(extra: list[str], text: list[str]) -> float:
 
 def analyze(words: list[dict], book_text: str) -> dict:
     """words: transcript words (all parts, in order), each with a "part" key."""
+    split = compounds(book_text)
     flat, owner = [], []
     for idx, w in enumerate(words):
         for p in normalize(w["word"]):
-            flat.append(p)
-            owner.append(idx)
+            for q in split.get(canon(p), [p]):
+                flat.append(q)
+                owner.append(idx)
 
     book = normalize(book_text)
     ops = align_words(book, flat)
 
     events = []
     kept = []
+    # Sentence and paragraph ends and asides from the book, on the spoken word that
+    # read them (or, if the book word was skipped, the last word before it).
+    brk = book_breaks(book_text)
+    breaks: dict[int, str] = {}
+    last = None
+    for kind, b, s in ops:
+        if s is not None and kind != EXTRA:
+            last = owner[s]
+        if b is not None and brk[b] in ("(", ".", "¶") and last is not None:
+            if BREAK_RANK[brk[b]] > BREAK_RANK[breaks.get(last, "")]:
+                breaks[last] = brk[b]
     k = 0
     while k < len(ops):
         kind, b, s = ops[k]
@@ -230,6 +343,7 @@ def analyze(words: list[dict], book_text: str) -> dict:
         "matched": matched,
         "coverage": round(matched / len(book), 3) if book else 0,
         "kept_words": kept,
+        "breaks": {str(i): c for i, c in sorted(breaks.items())},
         "events": events,
     }
 

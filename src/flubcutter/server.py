@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from flubcutter import __version__, importers, judge
 from flubcutter.align import book_context
 from flubcutter.jobs import Jobs
-from flubcutter.library import AUDIO_EXTS, CANDIDATES, Library
+from flubcutter.library import AUDIO_EXTS, CANDIDATES, EDITIONS, Library
 
 STATIC = Path(__file__).parent / "static"
 
@@ -49,7 +49,8 @@ def create_app(lib: Library) -> FastAPI:
             chapters = []
             for ch in book["chapters"]:
                 st = lib.status(b, ch)
-                st["busy"] = jobs.busy(b, ch["id"])
+                st["job"] = jobs.current(b, ch["id"])
+                st["busy"] = st["job"] is not None
                 chapters.append({"id": ch["id"], "title": ch["title"], "status": st})
             books.append({"id": b, "title": book["title"], "author": book.get("author", ""),
                           "chapters": chapters})
@@ -58,7 +59,13 @@ def create_app(lib: Library) -> FastAPI:
 
     @app.get("/api/jobs")
     def list_jobs():
-        return jobs.list()
+        out = jobs.list()
+        for j in out:
+            try:
+                j["title"] = lib.chapter(lib.book(j["book"]), j["chapter"])["title"]
+            except (KeyError, ValueError):
+                j["title"] = j["chapter"]
+        return out
 
     @app.post("/api/jobs")
     def submit_job(kind: str = Body(...), book: str = Body(...), chapter: str = Body(...),
@@ -71,13 +78,18 @@ def create_app(lib: Library) -> FastAPI:
 
     @app.post("/api/books/{b}/process")
     def process_book(b: str):
-        """Queue every chapter that has text and audio and still needs machine work."""
+        """Queue every chapter that still needs machine work: processing (which
+        renders by itself when nothing needs a person) or just a render."""
         book = book_or_404(b)
         queued = []
         for ch in book["chapters"]:
             st = lib.status(b, ch)
+            if jobs.busy(b, ch["id"]):
+                continue
             if st["stage"] in ("to transcribe", "to align", "to judge"):
                 queued.append(jobs.submit("process", b, ch["id"]))
+            elif st["stage"] in ("not rendered", "out of date"):
+                queued.append(jobs.submit("render", b, ch["id"]))
         return {"queued": len(queued)}
 
     # ---------- books ----------
@@ -94,7 +106,8 @@ def create_app(lib: Library) -> FastAPI:
         chapters = []
         for ch in book["chapters"]:
             st = lib.status(b, ch)
-            st["busy"] = jobs.busy(b, ch["id"])
+            st["job"] = jobs.current(b, ch["id"])
+            st["busy"] = st["job"] is not None
             chapters.append({**ch, "status": st})
         return {**book, "chapters": chapters, "audio": lib.audio_files(b),
                 "audio_dir": str(lib.book_dir(b) / "audio")}
@@ -204,8 +217,11 @@ def create_app(lib: Library) -> FastAPI:
                 if e["type"] in CANDIDATES:
                     e["candidate"] = True
                     e["suggestion"] = lib.suggestion(e, review)
+                    e["kind"] = lib.kind(e, review)
+                    e["ai_kind"] = review["ai"].get(e["id"], {}).get("kind")
                     e["decision"] = review["decisions"].get(e["id"])
                     e["flag"] = review.get("flagged", {}).get(e["id"])
+                    e["needs_you"] = lib.needs_you(e, review)
                     before, after = book_context(text, e["book_index"], 25, 25)
                     e["context"] = {"book_before": before, "book_after": after}
                 events.append(e)
@@ -220,16 +236,28 @@ def create_app(lib: Library) -> FastAPI:
         render = lib.render_info(b, c)
         if render:
             render.pop("chunks", None)
+        plain = lib.render_info(b, c, "plain")
+        if render and plain:
+            render["plain"] = {k: plain[k] for k in ("output_seconds", "pacing", "joins") if k in plain}
+        if render:
+            render["verdicts"] = lib.joins_state(b, c)["verdicts"]
         return {"book": {"id": b, "title": book["title"]}, "chapter": {"id": c, "title": ch["title"]},
                 "text": text, "parts": parts, "events": events,
-                "status": {**lib.status(b, ch), "busy": jobs.busy(b, c)},
+                "status": {**lib.status(b, ch), "busy": jobs.busy(b, c), "job": jobs.current(b, c)},
                 "coverage": a["coverage"] if a else None, "render": render}
 
     @app.put("/api/books/{b}/chapters/{c}/decisions")
     def put_decisions(b: str, c: str, changes: dict[str, str | None] = Body(...)):
         chapter_or_404(b, c)
         r = lib.set_decisions(b, c, changes)
-        return {"decisions": r["decisions"]}
+        return {"decisions": r["decisions"], "render": jobs.render_if_settled(b, c)}
+
+    @app.put("/api/books/{b}/chapters/{c}/kinds")
+    def put_kinds(b: str, c: str, changes: dict[str, str | None] = Body(...)):
+        """Mark extra speech as an "aside" or a "flub" (null: the AI's call)."""
+        chapter_or_404(b, c)
+        r = lib.set_kinds(b, c, changes)
+        return {"kinds": r.get("kinds", {}), "render": jobs.render_if_settled(b, c)}
 
     @app.get("/api/books/{b}/chapters/{c}/parts/{p}/peaks")
     def peaks(b: str, c: str, p: str):
@@ -241,26 +269,48 @@ def create_app(lib: Library) -> FastAPI:
         _, _, part = part_or_404(b, c, p)
         return FileResponse(lib.playable_audio(b, c, part))
 
+    def edition_or_404(edition: str) -> str:
+        if edition not in EDITIONS:
+            raise HTTPException(404, f"no such edition: {edition}")
+        return edition
+
     @app.get("/api/books/{b}/chapters/{c}/output")
-    def output_audio(b: str, c: str):
+    def output_audio(b: str, c: str, edition: str = "extended"):
         chapter_or_404(b, c)
-        out = lib.output_path(b, c)
+        out = lib.output_path(b, c, edition_or_404(edition))
         if not out.exists():
             raise HTTPException(404, "not rendered yet")
-        return FileResponse(out, filename=f"{b}-{c}.wav")
+        return FileResponse(out, filename=f"{b}-{c}-{edition}.wav")
 
     @app.get("/api/books/{b}/chapters/{c}/output/peaks")
-    def output_peaks(b: str, c: str):
+    def output_peaks(b: str, c: str, edition: str = "extended"):
         chapter_or_404(b, c)
-        if not lib.output_path(b, c).exists():
+        if not lib.output_path(b, c, edition_or_404(edition)).exists():
             raise HTTPException(404, "not rendered yet")
-        return JSONResponse(lib.output_peaks(b, c))
+        return JSONResponse(lib.output_peaks(b, c, edition))
+
+    @app.post("/api/books/{b}/chapters/{c}/joins/verdict")
+    def join_verdict(b: str, c: str, body: dict = Body(...)):
+        """Good or bad, for one cut. A bad one is rebuilt in the background
+        (the listener keeps listening) and comes up again once it is."""
+        chapter_or_404(b, c)
+        try:
+            r = lib.rate_join(b, c, str(body["key"]), str(body["verdict"]),
+                              edition_or_404(body.get("edition", "extended")),
+                              passive=bool(body.get("passive")))
+        except (RuntimeError, ValueError) as e:
+            raise HTTPException(409, str(e))
+        r.pop("render", None)
+        if r["verdict"] == "bad" and r.get("joins"):
+            r["job"] = jobs.submit("render", b, c)
+        return r
 
     @app.post("/api/books/{b}/chapters/{c}/glitch")
     def glitch(b: str, c: str, body: dict = Body(...)):
         chapter_or_404(b, c)
         try:
-            r = lib.report_glitch(b, c, float(body["time"]))
+            r = lib.report_glitch(b, c, float(body["time"]),
+                                  edition=edition_or_404(body.get("edition", "extended")))
         except RuntimeError as e:
             raise HTTPException(409, str(e))
         r["render"].pop("chunks", None)
@@ -274,4 +324,15 @@ def create_app(lib: Library) -> FastAPI:
         return HTMLResponse(page, headers={"Cache-Control": "no-cache"})
 
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+    # The app's scripts import each other, so a browser holding a cached copy
+    # of one and a fresh copy of another gets a blank page: always revalidate
+    # (the ETag makes that cheap).
+    @app.middleware("http")
+    async def revalidate_static(request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     return app

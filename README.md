@@ -25,9 +25,12 @@ conversations with the listeners.
    speech") goes to Claude, which decides *cut* (stumbles, "where was I",
    lead-ins) or *keep* (jokes, explanations, chats with the kids). This step
    runs through the `claude` CLI, so it uses your existing Claude login.
-4. **Review**: in the web app you see the waveform with every flub
-   highlighted, hear each one with pre-roll and post-roll ("play with cut" vs
-   "play original"), and approve or reject it, mostly with the keyboard.
+4. **Review**: only what the app is unsure of waits for you (*Needs you*:
+   extra speech nobody judged, or an AI call under 80% sure, least sure
+   first); everything else is accepted as suggested. In the web app you see
+   the waveform with every edit highlighted, hear each one with pre-roll and
+   post-roll ("play with cut" vs "play original"), and change it, mostly
+   with the keyboard. Once nothing needs you, the chapter renders by itself.
 5. **Render**: every cut is placed by measuring the audio rather than
    trusting the word timestamps (which are only good to ~80 ms):
    - the real start and end of each kept word come from a 5 ms loudness
@@ -38,10 +41,16 @@ conversations with the listeners.
      flub with no gap, the cut is *tight*: it fades across the quietest point,
      and the app marks it so you know where to listen;
    - **pacing is measured, not guessed.** From every pair of neighbouring
-     words you kept, Flubcutter learns how long *you* pause after a full
-     stop, after a comma and between other words (run-on words count as no
-     pause). A cut gets your usual pause for that spot, counting a breath
-     as part of it; a pause of your own that is long enough to sound like a
+     words you kept, Flubcutter learns how long *you* pause at the end of a
+     paragraph, after a full stop, going into and out of an aside (in
+     brackets or between dashes), after a comma and between other words
+     (run-on words count as no pause; sentence and paragraph ends come from
+     the book text, so a full stop the transcript missed still counts).
+     Mid-sentence, a cut gets your usual pause, so the dead air of flubs and
+     page turns goes. At the end of a sentence or paragraph, or at the edge
+     of an aside, a long silence
+     is more likely a breath the listener wants, so up to the long end of
+     your range there is kept. A breath counts as part of a pause; a pause of your own that is long enough to sound like a
      mistake is shortened to the long end of your normal range. Dead air is
      the most obvious tell of an edit, so the finished audio is then scored
      on its own: any pause outside your range is flagged and marked in the
@@ -51,11 +60,23 @@ conversations with the listeners.
      are transcribed again. If the words meeting at a cut don't come out
      intact (a clipped word end, a leaked bit of a flub), that cut is rebuilt
      more cautiously and checked again.
+   - **studio sound**: each recording is first cleaned into a cached
+     *master* with [DPDFNet](https://pypi.org/project/dpdfnet/) (an ONNX
+     denoiser on the CPU, ~10 MB model downloaded on first use; it turns
+     noise down and never generates audio, so it can't change a word), then
+     a highpass, a light presence lift, a de-esser and gentle compression.
+     The noise reduction is deliberately light (4 to 10 dB): listeners stop
+     noticing a little room tone at once, while heavy denoising makes the
+     voice thin and watery. Cuts are still placed by measuring the
+     original (denoising would make breaths count as sound), but the audio
+     and room tone come from the master. The finished chapter is brought to
+     -19 LUFS with true peaks under -3 dB. Transcription keeps using the
+     original recording.
 6. **Glitch reports**: play the cleaned chapter in the app and press **G**
    (or the *Glitch* button) right after anything that doesn't sound right.
    The cuts in the last 3 seconds are rebuilt more cautiously (wider safety
-   margins, more room tone, longer fades, a slightly tighter pause; never a
-   longer one) and the spot replays at once. A cut
+   margins, more room tone, a tight cut set further back from the sound it
+   cuts away, the pause unchanged) and the spot replays at once. A cut
    reported three times puts its flub back up for review: the cut itself is
    probably in the wrong place. Every report is logged, with a clip of the
    audio, in `work/<chapter>/joins.json` and `work/<chapter>/glitches/`, so
@@ -92,8 +113,11 @@ In the app:
    ebook file (or add them one by one and paste the text).
 2. Add recordings, then assign one or more to each chapter as *parts*, in
    reading order.
-3. **Process all** transcribes, aligns and AI-judges every chapter in the
-   background.
+3. **Process all** transcribes, aligns, AI-judges and renders every
+   chapter in the background. Each chapter shows one status: *Needs text*,
+   *Needs recordings*, *Not processed*, what it's doing now with its
+   progress, *Needs you: N*, *Not rendered*, *Out of date* (edits changed
+   since the render) or *Ready*. The library lists what needs you first.
 4. Open a chapter to review. Keys: `P`/`Enter` play with cut, `O` play the
    original, `X` cut, `K` keep, `←`/`→` previous/next, `Space` play/pause,
    `Backspace` undo. With auto-advance on, each decision jumps to the next

@@ -41,7 +41,7 @@ export function toast(msg, err = false) {
   t.className = "toast" + (err ? " err" : "");
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), err ? 6000 : 2500);
+  toastTimer = setTimeout(() => (t.hidden = true), Math.max(err ? 6000 : 2500, 70 * msg.length));
 }
 
 export async function guard(fn) {
@@ -58,21 +58,48 @@ function fmtSize(b) {
   return b > 1e9 ? (b / 1e9).toFixed(1) + " GB" : b > 1e6 ? (b / 1e6).toFixed(1) + " MB" : Math.ceil(b / 1e3) + " KB";
 }
 
-const STAGES = [
-  ["needs text", "blocked", "#9a9a92"],
-  ["needs audio", "blocked", "#c4c4bc"],
-  ["to transcribe", "machine", "#93c5fd"],
-  ["to align", "machine", "#60a5fa"],
-  ["to judge", "machine", "#3b82f6"],
-  ["to review", "review", "#e8a317"],
-  ["to render", "review", "#f2c14e"],
-  ["done", "done", "#2f9e6b"],
-];
-const stageInfo = Object.fromEntries(STAGES.map(([s, cls, color]) => [s, { cls, color }]));
+// One plain status per chapter: what it is waiting for, or what is
+// happening to it right now. "Ready" is quiet; what needs action stands out.
+export const MACHINE = ["to transcribe", "to align", "to judge"];
+const cap = (t) => t.charAt(0).toUpperCase() + t.slice(1);
+const JOB_LABEL = { transcribe: "transcribing", align: "aligning", judge: "AI judging", render: "rendering", process: "processing" };
 
-export function stagePill(st) {
-  const info = stageInfo[st.stage] || { cls: "blocked" };
-  return h("span", { class: `pill s-${info.cls}${st.busy ? " busy" : ""}` }, st.busy ? "working…" : st.stage);
+export function jobLabel(job) {
+  if (job.state === "queued") return "Queued";
+  const step = (job.step && job.step !== "done" ? job.step : JOB_LABEL[job.kind] || job.kind).replace(/ \((plain|extended)\)$/, "");
+  return `${cap(step)}… ${Math.round((job.progress || 0) * 100)}%`;
+}
+
+export function statusOf(st) {
+  if (st.job) return { label: jobLabel(st.job), tone: "busy", hint: st.job.kind === "render" ? "Making the cleaned audio" : "Working on it, nothing for you to do" };
+  const fmt = (x) => fmtTime(x).replace(/\.\d$/, "");
+  switch (st.stage) {
+    case "needs text": return { label: "Needs text", tone: "todo", hint: "Paste or import the book text" };
+    case "needs audio": return { label: "Needs recordings", tone: "todo", hint: "Add a recording on the book page" };
+    case "to transcribe": case "to align": case "to judge":
+      return { label: "Not processed", tone: "todo", hint: "Process it: transcribe, find the flubs, render" };
+    case "needs you": return { label: `Needs you: ${st.needs_you}`, tone: "action", hint: `${st.needs_you} edit${st.needs_you > 1 ? "s" : ""} the AI wasn't sure about` };
+    case "not rendered": return { label: "Not rendered", tone: "todo", hint: "Edits are settled; render to hear it" };
+    case "out of date": return { label: "Out of date", tone: "todo", hint: "Edits changed since the last render" };
+    case "ready": return { label: "Ready", tone: "done",
+      hint: st.plain_seconds != null && st.plain_seconds !== st.output_seconds
+        ? `Plain ${fmt(st.plain_seconds)} · Extended ${fmt(st.output_seconds)}` : `${fmt(st.output_seconds)} long` };
+    default: return { label: st.stage, tone: "todo", hint: "" };
+  }
+}
+
+// data-job lets the job poller update the progress in place.
+export function statusTag(st, { book, chapter } = {}) {
+  const s = statusOf(st);
+  return h("span", { class: `status t-${s.tone}`, "data-job": book && chapter ? `${book}/${chapter}` : null },
+    h("span", { class: "label" }, s.label),
+    s.tone === "busy" ? bar(st.job.state === "queued" ? 0 : st.job.progress, "blue") : null);
+}
+export const stagePill = statusTag;
+
+// Where a chapter's row takes you: the step its status names.
+export function chapterHref(book, c) {
+  return c.status.aligned ? `#/book/${book}/ch/${c.id}` : `#/book/${book}`;
 }
 
 function bar(frac, color = "") {
@@ -117,10 +144,9 @@ async function pollJobs() {
     const running = jobs.find((j) => j.state === "running");
     if (active.length) {
       box.hidden = false;
-      const label = running
-        ? `${running.step || running.kind} · ${running.chapter}`
-        : `${active.length} queued`;
-      box.replaceChildren(h("span", {}, label + (active.length > 1 ? ` (+${active.length - 1})` : "")),
+      const label = running ? `${running.title || running.chapter}: ${jobLabel(running)}` : `${active.length} queued`;
+      box.replaceChildren(h("a", { href: running ? `#/book/${running.book}/ch/${running.chapter}` : "#/" },
+        label + (active.length > 1 ? ` (+${active.length - 1} queued)` : "")),
         bar(running ? running.progress : 0, "blue"));
     } else {
       box.hidden = true;
@@ -131,6 +157,13 @@ async function pollJobs() {
         toast(`${j.kind} failed for ${j.chapter}: ${j.error}`, true);
       }
     }
+    for (const j of active) {
+      document.querySelectorAll(`[data-job="${j.book}/${j.chapter}"]`).forEach((el) => {
+        el.querySelector(".label").textContent = jobLabel(j);
+        const b = el.querySelector(".bar > span");
+        if (b) b.style.width = `${Math.round((j.state === "running" ? j.progress : 0) * 100)}%`;
+      });
+    }
     const key = jobs.map((j) => `${j.id}:${j.state}`).join(",");
     if (key !== lastJobsKey) {
       const changed = lastJobsKey !== "";
@@ -139,6 +172,7 @@ async function pollJobs() {
     }
   } catch {}
 }
+export { pollJobs };
 setInterval(pollJobs, 1500);
 pollJobs();
 
@@ -153,51 +187,36 @@ export async function submitJob(kind, book, chapter, part) {
 async function renderDashboard(view) {
   setCrumbs([{ label: "Library" }]);
   const lib = await api("/api/library");
-  const all = lib.books.flatMap((b) => b.chapters.map((c) => c.status));
-  const sum = (f) => all.reduce((a, s) => a + f(s), 0);
-  const parts = sum((s) => s.parts), transcribed = sum((s) => s.transcribed);
-  const cands = sum((s) => s.candidates), reviewed = sum((s) => s.reviewed);
-  const withAudio = all.filter((s) => s.parts > 0).length;
-  const aligned = all.filter((s) => s.aligned).length;
-  const done = all.filter((s) => s.stage === "done").length;
-  const rendered = all.filter((s) => s.input_seconds !== null);
-  const inSec = rendered.reduce((a, s) => a + s.input_seconds, 0);
-  const outSec = rendered.reduce((a, s) => a + s.output_seconds, 0);
-  const fmtDur = (s) => (s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m` : `${Math.floor(s / 60)}m ${Math.round(s % 60)}s`);
+  const all = lib.books.flatMap((b) => b.chapters.map((c) => ({ b, c })));
+  const waiting = all.filter(({ c }) => !c.status.job && c.status.stage === "needs you");
+  const decisions = waiting.reduce((a, { c }) => a + c.status.needs_you, 0);
+  const working = all.filter(({ c }) => c.status.job).length;
 
-  const stat = (label, value, total, color) =>
-    h("div", { class: "panel stat" },
-      h("div", { class: "label" }, label),
-      h("div", { class: "value" }, value, h("small", {}, ` / ${total}`)),
-      bar(total ? value / total : 0, color));
+  // One banner: what needs you, else what is happening, else nothing.
+  const banner = waiting.length
+    ? h("a", { class: "banner action", href: chapterHref(waiting[0].b.id, waiting[0].c) },
+        h("b", {}, `${waiting.length} chapter${waiting.length > 1 ? "s" : ""} need${waiting.length > 1 ? "" : "s"} you`),
+        ` (${decisions} edit${decisions > 1 ? "s" : ""} the AI wasn't sure about). Start with “${waiting[0].c.title}” →`)
+    : working ? h("div", { class: "banner" }, `Working on ${working} chapter${working > 1 ? "s" : ""}. Nothing needs you right now.`)
+      : null;
 
   const books = lib.books.map((b) => {
-    const counts = {};
-    b.chapters.forEach((c) => (counts[c.status.stage] = (counts[c.status.stage] || 0) + 1));
-    const n = b.chapters.length || 1;
-    const stagebar = h("div", { class: "stagebar", title: Object.entries(counts).map(([k, v]) => `${v} ${k}`).join(", ") },
-      STAGES.filter(([s]) => counts[s]).map(([s, , color]) =>
-        h("span", { style: `width:${(counts[s] / n) * 100}%;background:${color}` })));
+    const ready = b.chapters.filter((c) => c.status.stage === "ready" && !c.status.job).length;
     const rows = b.chapters.map((c, i) => {
-      const s = c.status;
-      return h("tr", { class: "clickable", onclick: () => (location.hash = s.aligned ? `#/book/${b.id}/ch/${c.id}` : `#/book/${b.id}`) },
-        h("td", { class: "num" }, i + 1),
-        h("td", {}, c.title),
-        h("td", {}, stagePill(s)),
-        h("td", { class: "prog small muted" }, `transcribed ${s.transcribed}/${s.parts}`, bar(s.parts ? s.transcribed / s.parts : 0, "blue")),
-        h("td", { class: "prog small muted" }, `reviewed ${s.reviewed}/${s.candidates}`, bar(s.candidates ? s.reviewed / s.candidates : (s.aligned ? 1 : 0), "amber")));
+      const s = statusOf(c.status);
+      return h("a", { class: `task t-${s.tone}`, href: chapterHref(b.id, c) },
+        h("span", { class: "num" }, i + 1),
+        h("span", { class: "name" }, h("span", {}, c.title), h("span", { class: "small muted" }, s.hint)),
+        statusTag(c.status, { book: b.id, chapter: c.id }));
     });
     return h("section", { class: "panel" },
       h("div", { class: "panel-head" },
         h("div", {}, h("h2", {}, h("a", { href: `#/book/${b.id}`, style: "text-decoration:none" }, b.title)),
-          h("div", { class: "small muted" }, [b.author, `${b.chapters.length} chapters`].filter(Boolean).join(" · "))),
-        stagebar,
-        h("a", { class: "btn", href: `#/book/${b.id}` }, "Manage")),
+          h("div", { class: "small muted" }, [b.author, `${ready} of ${b.chapters.length} chapters ready`].filter(Boolean).join(" · "))),
+        h("span", { class: "spacer" }),
+        h("a", { class: "btn", href: `#/book/${b.id}` }, "Recordings & chapters")),
       b.chapters.length
-        ? h("table", { class: "chapters" },
-            h("thead", {}, h("tr", {}, h("th", {}, "#"), h("th", {}, "Chapter"), h("th", {}, "Stage"),
-              h("th", { class: "prog" }, "Transcription"), h("th", { class: "prog" }, "Review"))),
-            h("tbody", {}, rows))
+        ? h("div", { class: "tasks" }, rows)
         : h("div", { class: "empty" }, "No chapters yet. ", h("a", { href: `#/book/${b.id}` }, "Import the book text"), "."));
   });
 
@@ -206,20 +225,8 @@ async function renderDashboard(view) {
       h("div", { class: "row" }, h("h1", {}, "Library"), h("span", { class: "spacer" }),
         h("span", { class: "small muted mono" }, lib.root),
         h("button", { class: "primary", onclick: newBook }, "New book")),
-      !lib.judge ? h("div", { class: "panel panel-body small" }, "The AI judge needs the ", h("code", {}, "claude"), " CLI on your PATH. Without it, unexplained extra speech is kept until you review it.") : null,
-      lib.books.length ? h("div", { class: "stats" },
-        stat("Parts transcribed", transcribed, parts, "blue"),
-        stat("Chapters aligned", aligned, withAudio, "blue"),
-        stat("Flubs reviewed", reviewed, cands, "amber"),
-        stat("Chapters finished", done, all.length, "green"),
-        h("div", { class: "panel stat" },
-          h("div", { class: "label" }, "Audio trimmed"),
-          h("div", { class: "value" }, rendered.length ? fmtDur(inSec - outSec) : "–",
-            rendered.length ? h("small", {}, ` of ${fmtDur(inSec)}`) : null),
-          h("div", { class: "small muted" }, rendered.length
-            ? `${Math.round((1 - outSec / inSec) * 100)}% removed across ${rendered.length} rendered chapter(s)`
-            : "Shows up once chapters are rendered"))) : null,
-      lib.books.length ? h("div", { class: "legend" }, STAGES.map(([s, , color]) => h("span", {}, h("i", { style: `background:${color}` }), s))) : null,
+      banner,
+      !lib.judge ? h("div", { class: "panel panel-body small" }, "The AI judge needs the ", h("code", {}, "claude"), " CLI on your PATH. Without it, unexplained extra speech waits for you.") : null,
       ...books,
       lib.books.length ? null : h("div", { class: "panel empty" },
         h("p", {}, "Your library is empty."),
@@ -298,15 +305,18 @@ async function renderBook(view, bookId) {
       `${k + 1}. ${p.audio.replace(/^audio\//, "")}`,
       k > 0 ? h("button", { title: "Move earlier", onclick: () => guard(async () => { await api(`/api/books/${bookId}/chapters/${c.id}/parts/${p.id}/move`, { json: { delta: -1 } }); refresh(); }) }, "↑") : null,
       h("button", { title: "Remove from chapter", onclick: () => guard(async () => { await api(`/api/books/${bookId}/chapters/${c.id}/parts/${p.id}`, { method: "DELETE" }); refresh(); }) }, "✕")));
-    const canProcess = ["to transcribe", "to align", "to judge"].includes(s.stage);
+    const canProcess = MACHINE.includes(s.stage);
+    const canRender = ["not rendered", "out of date"].includes(s.stage);
     return h("tr", {},
       h("td", { class: "num" }, i + 1),
       h("td", {}, h("div", {}, c.title), h("div", { class: "small muted" }, `${s.words.toLocaleString()} words`)),
       h("td", {}, parts, h("div", {}, select)),
-      h("td", {}, stagePill(s)),
+      h("td", {}, statusTag(s, { book: bookId, chapter: c.id }), h("div", { class: "small muted" }, statusOf(s).hint)),
       h("td", { style: "text-align:right;white-space:nowrap" },
         canProcess && !s.busy ? h("button", { onclick: () => guard(async () => { await submitJob("process", bookId, c.id); refresh(); }) }, "Process") : null,
-        s.aligned ? h("a", { class: "btn primary", href: `#/book/${bookId}/ch/${c.id}` }, "Review") : null,
+        canRender && !s.busy ? h("button", { onclick: () => guard(async () => { await submitJob("render", bookId, c.id); refresh(); }) }, "Render") : null,
+        s.aligned ? h("a", { class: "btn" + (s.stage === "needs you" ? " primary" : ""), href: `#/book/${bookId}/ch/${c.id}` },
+          s.stage === "needs you" ? "Review" : "Open") : null,
         " ",
         h("button", { class: "ghost icon", title: "Edit text", onclick: () => editChapter(bookId, c, refresh) }, "✎"),
         h("button", { class: "ghost icon", title: "Move up", disabled: i === 0, onclick: () => guard(async () => { await api(`/api/books/${bookId}/chapters/${c.id}/move`, { json: { delta: -1 } }); refresh(); }) }, "↑"),
@@ -317,7 +327,7 @@ async function renderBook(view, bookId) {
         } }, "🗑")));
   });
 
-  const processable = book.chapters.filter((c) => ["to transcribe", "to align", "to judge"].includes(c.status.stage) && !c.status.busy).length;
+  const processable = book.chapters.filter((c) => [...MACHINE, "not rendered", "out of date"].includes(c.status.stage) && !c.status.busy).length;
 
   view.replaceChildren(h("div", { class: "stack" },
     h("div", { class: "row" },
@@ -344,7 +354,7 @@ async function renderBook(view, bookId) {
         }) }, `Process all${processable ? ` (${processable})` : ""}`)),
       book.chapters.length
         ? h("table", { class: "chapters" },
-            h("thead", {}, h("tr", {}, h("th", {}, "#"), h("th", {}, "Chapter"), h("th", {}, "Recording parts, in order"), h("th", {}, "Stage"), h("th", {}))),
+            h("thead", {}, h("tr", {}, h("th", {}, "#"), h("th", {}, "Chapter"), h("th", {}, "Recording parts, in order"), h("th", {}, "Status"), h("th", {}))),
             h("tbody", {}, rows))
         : h("div", { class: "empty" }, "Import the book from an EPUB or text file, or add chapters one by one and paste their text.")),
     h("section", { class: "panel" },

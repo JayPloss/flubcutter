@@ -29,9 +29,11 @@ class Jobs:
             raise ValueError(f"unknown job kind {kind}")
         with self._lock:
             for j in self._jobs.values():
+                # A running job may have started before the latest change,
+                # so only a queued one makes a new one unnecessary.
                 if (j["kind"], j["book"], j["chapter"], j["part"]) == (kind, book, chapter, part) \
-                        and j["state"] in ("queued", "running"):
-                    return j  # already pending
+                        and j["state"] == "queued":
+                    return j
             job = {"id": next(self._ids), "kind": kind, "book": book, "chapter": chapter,
                    "part": part, "state": "queued", "progress": 0.0, "step": "",
                    "error": None, "created": time.time(), "finished": None}
@@ -50,9 +52,23 @@ class Jobs:
             return [dict(j) for j in jobs]
 
     def busy(self, book: str, chapter: str) -> bool:
+        return self.current(book, chapter) is not None
+
+    def current(self, book: str, chapter: str) -> dict | None:
+        """The chapter's running job, or else its first queued one."""
         with self._lock:
-            return any(j["book"] == book and j["chapter"] == chapter
-                       and j["state"] in ("queued", "running") for j in self._jobs.values())
+            mine = [j for j in self._jobs.values() if j["book"] == book and j["chapter"] == chapter
+                    and j["state"] in ("queued", "running")]
+        mine.sort(key=lambda j: (j["state"] != "running", j["id"]))
+        return {k: mine[0][k] for k in ("id", "kind", "state", "step", "progress")} if mine else None
+
+    def render_if_settled(self, book: str, chapter: str) -> dict | None:
+        """Queue a render once nothing waits for a person and the cleaned
+        audio is missing or older than the decisions."""
+        st = self.lib.status(book, self.lib.chapter(self.lib.book(book), chapter))
+        if st["stage"] in ("not rendered", "out of date"):
+            return self.submit("render", book, chapter)
+        return None
 
     def _worker(self):
         while True:
@@ -116,8 +132,9 @@ class Jobs:
             raise RuntimeError("chapter has no audio parts")
         todo = [p for p, t in zip(ch["parts"], lib.transcripts(b, ch)) if t is None]
         for k, p in enumerate(todo):
-            def part_progress(f, k=k, p=p):
-                progress(0.85 * (k + f) / len(todo), f"transcribing {p['id']}")
+            def part_progress(f, k=k):
+                progress(0.85 * (k + f) / len(todo),
+                         "transcribing" + (f" part {k + 1} of {len(todo)}" if len(todo) > 1 else ""))
             part_progress(0.0)
             lib.run_transcribe(b, c, p["id"], progress=part_progress)
         progress(0.86, "aligning")
@@ -126,3 +143,6 @@ class Jobs:
         if judge.available():
             progress(0.9, "AI judging")
             self._judge(b, c, lambda f: progress(0.9 + 0.1 * f, "AI judging"))
+        progress(1.0, "done")
+        # Nothing needs a person: go straight on to the cleaned audio.
+        self.render_if_settled(b, c)

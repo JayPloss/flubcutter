@@ -9,7 +9,7 @@ rebuilt more cautiously (see edit.LEVELS).
 
 from pathlib import Path
 
-from flubcutter.align import normalize
+from flubcutter.align import canon, normalize
 
 # Seconds of output before and after the join to listen to; tried in turn.
 WINDOWS = [(2.0, 2.0), (2.6, 1.7), (1.7, 2.6)]
@@ -20,15 +20,23 @@ def heard_ok(heard: list[str], before: list[str], after: list[str]) -> bool:
     one after it, both intact and with nothing in between? (Words further
     from the join are left out: the recogniser hears those a little
     differently from time to time, which says nothing about the cut.)"""
-    want = before[-1:] + after[:1]
+    want = [canon(w) for w in before[-1:] + after[:1]]
+    heard = [canon(w) for w in heard]
     n = len(want)
-    return any(heard[i:i + n] == want for i in range(len(heard) - n + 1))
+    if any(heard[i:i + n] == want for i in range(len(heard) - n + 1)):
+        return True
+    # A compound split at the join can come back closed up: "rabbit" "hole"
+    # heard as "rabbithole".
+    return any(h == "".join(want) for h in heard)
 
 
 def check_joins(output: Path, joins: list[dict], only: set[str] | None = None,
-                progress=None) -> dict[str, dict]:
+                progress=None, book: dict[int, str] | None = None) -> dict[str, dict]:
     """{join key: {"ok": True/False, or None if nothing was heard, "heard": text}}
-    for the joins in `only` (default all)."""
+    for the joins in `only` (default all). book: the book's word for transcript
+    words the recogniser got wrong the first time (the listen-back may well
+    hear it right)."""
+    book = book or {}
     from flubcutter.transcribe import SAMPLE_RATE, load_audio, words_in
 
     todo = [j for j in joins if only is None or j["key"] in only]
@@ -39,6 +47,9 @@ def check_joins(output: Path, joins: list[dict], only: set[str] | None = None,
     for n, j in enumerate(todo):
         before = normalize(" ".join(j["before"]))
         after = normalize(" ".join(j["after"]))
+        a_i, b_i = (int(x.split(":")[1]) for x in j["key"].split(">"))
+        alt = (before[:-1] + normalize(book[a_i]) if a_i in book else before,
+               normalize(book[b_i]) + after[1:] if b_i in book else after)
         result = {"ok": None, "heard": ""}
         # The recogniser occasionally returns nothing for a clip that starts
         # mid-word; nudging the window fixes that. A join only fails if it was
@@ -49,7 +60,8 @@ def check_joins(output: Path, joins: list[dict], only: set[str] | None = None,
             heard = words_in(audio[a:b])
             if not heard:
                 continue
-            ok = heard_ok(normalize(" ".join(heard)), before, after)
+            said = normalize(" ".join(heard))
+            ok = heard_ok(said, before, after) or heard_ok(said, *alt)
             result = {"ok": ok, "heard": " ".join(heard)}
             if ok:
                 break

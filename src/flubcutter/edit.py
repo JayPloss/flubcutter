@@ -13,9 +13,15 @@ timestamps (which are only accurate to about 80 ms):
    *tight* cut: it goes at the quietest point and fades quickly, and the
    render report flags it so it is easy to find and listen to.
 3. Build the pause to the reader's own typical length for the punctuation
-   there (measured from the rest of the recording: a full stop gets a longer
-   pause than a comma), from the original silence on each side plus,
-   if that is too short, real room tone taken from a nearby quiet stretch.
+   there (measured from the rest of the recording: a paragraph end gets a
+   longer pause than a full stop, a full stop than the edge of an aside in
+   brackets or dashes, and that a longer one than a comma), from
+   the original silence on each side plus, if that is too short, real room
+   tone taken from a nearby quiet stretch. Mid-sentence, dead air around a
+   cut is flubs and page turns and goes. At the end of a sentence or
+   paragraph, or going into or out of an aside, a long silence is more likely
+   a breath the listener wants, so some of it is kept (up to the long end of
+   the reader's range there).
 4. Join pieces with equal-power crossfades, so noise doesn't dip in level.
 
 Every join has a stable key. When a listener reports a glitch at a join, the
@@ -25,6 +31,7 @@ fades and a slightly longer pause (see LEVELS).
 """
 
 import math
+import re
 import subprocess
 import wave
 from pathlib import Path
@@ -33,6 +40,7 @@ import numpy as np
 
 RATE = 48000
 MAX_PAUSE = 1.2    # longest silence allowed in the output, in seconds
+PARA_PAUSE = 2.0   # ... except at the end of a paragraph
 LEAD_IN = 0.3      # silence before the first word of the chapter
 END_TAIL = 0.8     # silence after the last word of the chapter
 HOP = 0.005        # loudness envelope resolution
@@ -57,11 +65,13 @@ PUNCT = {".": ".", "!": ".", "?": ".", ":": ",", ";": ",", ",": ",", "-": ","}
 #              start of the word that was cut
 LEVELS = [
     dict(margin=0.015, keep=None, hard_fade=0.035, pace=1.0, shift=0.0),
-    dict(margin=0.03, keep=0.12, hard_fade=0.05, pace=0.85, shift=0.03),
-    dict(margin=0.05, keep=0.06, hard_fade=0.07, pace=0.7, shift=0.05),
+    dict(margin=0.03, keep=0.12, hard_fade=0.05, pace=1.0, shift=0.03),
+    dict(margin=0.05, keep=0.06, hard_fade=0.07, pace=1.0, shift=0.05),
 ]
 QUIET_DB = 8.0     # silence: within this many dB of the recording's noise floor
 MIN_QUIET = 0.04   # shortest gap that counts as silence
+TONE_DB = 4.0      # room tone: within this many dB of the floor
+TONE_EDGE = 0.04   # ...and this far from any sound
 MAX_LEVEL = len(LEVELS) - 1
 
 
@@ -112,11 +122,18 @@ def load(path: Path, rate: int = RATE) -> np.ndarray:
 # ---------- acoustics ----------
 
 class Acoustics:
-    """Loudness envelope of one recording, relative to its own noise floor."""
+    """Loudness envelope of one recording, relative to its own noise floor.
 
-    def __init__(self, audio: np.ndarray):
+    analysis: the same recording before enhancement, if `audio` is the
+    enhanced master. Silence is judged on the original: denoising lowers the
+    floor so far that breaths and word tails, hidden under the noise before,
+    would count as sound and the reader's pauses would measure short. Room
+    tone still comes from `audio`."""
+
+    def __init__(self, audio: np.ndarray, analysis: np.ndarray | None = None):
         self.audio = audio
         self.duration = len(audio) / RATE
+        audio = audio if analysis is None else analysis[:len(audio)]
         self.db = self._envelope(audio)
         self.floor = float(np.percentile(self.db, 10))
         # Soft consonants at word edges (s, f, th, the end of "hedge") carry
@@ -125,7 +142,11 @@ class Acoustics:
         hiss = np.diff(audio, n=2, prepend=audio[:1], append=audio[-1:]) if len(audio) > 2 else audio
         self.db_hf = self._envelope(hiss)
         self.floor_hf = float(np.percentile(self.db_hf, 10))
+        # Room tone is judged on the audio it comes from as well (see room_tone).
+        self.tone_db = self.db if analysis is None else self._envelope(self.audio)
+        self.tone_floor = float(np.percentile(self.tone_db, 10))
         self._quiet = {}
+        self._tone = None
 
     @staticmethod
     def _envelope(x: np.ndarray) -> np.ndarray:
@@ -162,21 +183,36 @@ class Acoustics:
         seg = np.convolve(self.db[k0:k1 + 1], np.ones(3) / 3, mode="same")
         return (k0 + int(np.argmin(seg))) * HOP + WIN / 2
 
+    def _tone_stretches(self):
+        """(start, length) of every stretch good for room tone, in seconds.
+
+        Stricter than silence for cutting: the stretch has to be near the
+        floor in the audio the tone is taken from too (a denoised master
+        shows the soft start of a word that the original's noise hid), and
+        its edges, which touch speech, are left out. Otherwise the fill can
+        carry the first sliver of a word, and looping it makes a chirp."""
+        if self._tone is None:
+            q, _, _ = self.quiet(0)
+            q = q & (self.tone_db < self.tone_floor + TONE_DB)
+            edges = np.diff(np.concatenate([[0], q.astype(np.int8), [0]]))
+            starts, ends = np.nonzero(edges == 1)[0], np.nonzero(edges == -1)[0]
+            s = starts * HOP + TONE_EDGE
+            n = (ends - starts - 1) * HOP + WIN - 2 * TONE_EDGE
+            good = n >= 0.15
+            self._tone = (s[good], n[good])
+        return self._tone
+
     def room_tone(self, t: float, seconds: float) -> np.ndarray:
         """Real background noise from the quiet stretch nearest to time t."""
         n = max(1, int(seconds * RATE))
-        q, fwd, _ = self.quiet(0)
-        starts = np.nonzero(q & np.concatenate([[True], ~q[:-1]]))[0]
-        lengths = fwd[starts] * HOP + WIN - 2 * LEVELS[0]["margin"]
-        good = lengths >= 0.15
-        if good.any():
-            starts, lengths = starts[good], lengths[good]
-            centre = starts * HOP + LEVELS[0]["margin"] + lengths / 2
+        starts, lengths = self._tone_stretches()
+        if len(starts):
+            centre = starts + lengths / 2
             i = int(np.argmin(np.abs(centre - t) / np.minimum(lengths, 1.0)))
-            a = int((starts[i] * HOP + LEVELS[0]["margin"]) * RATE)
+            a = int(starts[i] * RATE)
             source = self.audio[a:a + int(lengths[i] * RATE)]
         else:  # never quiet: use the quietest 150 ms there is
-            k = int(np.argmin(np.convolve(self.db, np.ones(30), mode="valid")))
+            k = int(np.argmin(np.convolve(self.tone_db, np.ones(30), mode="valid")))
             source = self.audio[k * int(HOP * RATE):][: int(0.15 * RATE)]
         if len(source) >= n:
             off = (len(source) - n) // 2
@@ -195,6 +231,36 @@ def _xfade(a: np.ndarray, b: np.ndarray, n: int) -> np.ndarray:
     x = np.linspace(0.0, 1.0, n, dtype=np.float32)
     mid = a[-n:] * np.cos(x * math.pi / 2) + b[:n] * np.sin(x * math.pi / 2)
     return np.concatenate([a[:-n], mid, b[n:]])
+
+
+def _sound_after(ac: Acoustics, t: float) -> float:
+    """Where the next sound (full band, above the silence threshold) starts after t."""
+    loud = ac.db[ac.k(t):] >= ac.floor + QUIET_DB
+    return ac.k(t) * HOP + (int(np.argmax(loud)) * HOP if loud.any() else ac.duration)
+
+
+def _sound_before(ac: Acoustics, t: float) -> float:
+    """Where the last sound before t ends."""
+    loud = ac.db[:ac.k(t) + 1] >= ac.floor + QUIET_DB
+    if not loud.any():
+        return 0.0
+    return (len(loud) - 1 - int(np.argmax(loud[::-1]))) * HOP + WIN
+
+
+_HISSING_END = re.compile(r"(s|z|x|f|ff|sh|ch|th|gh|ce|se|ze|ve|ge|tch|ts)$")
+
+
+def _ends_hissing(word: str) -> bool:
+    """Whether a word ends in a fricative, whose hiss belongs to it ("this",
+    "laugh", "edge"), going by its spelling."""
+    return bool(_HISSING_END.search(re.sub(r"[^a-z]", "", word.lower())))
+
+
+def _clearance(L: dict) -> float:
+    """How far a tight cut's centre stays from sound on its far side: its
+    fade must be over before the sound it cuts away begins (or must start
+    after it ends), or a sliver of that sound is heard."""
+    return L["hard_fade"] / 2 + L["margin"] / 2
 
 
 def out_point(ac: Acoustics, word: dict, hi: float, level: int) -> dict:
@@ -225,9 +291,26 @@ def out_point(ac: Acoustics, word: dict, hi: float, level: int) -> dict:
             k += fwd[k]
         else:
             k += 1
-    # No silence at all before the next word: cut at the quietest point.
+    # No silence at all before the next word: cut at the quietest point,
+    # far enough before the next sound that the fade doesn't reach it.
     lo = max(word["start"] + 0.02, word["end"] - 0.10 - L["shift"])
-    return {"t": ac.valley(lo, min(hi + 0.03, word["end"] + 0.03)), "avail": 0.0, "hard": True}
+    top = min(hi + 0.03, word["end"] + 0.03)
+    t = ac.valley(lo, top)
+    limit = _sound_after(ac, t) - _clearance(L)
+    if ac.db[ac.k(t)] < ac.floor + QUIET_DB and t > limit and limit - WIN / 2 > lo:
+        t = ac.valley(lo, limit - WIN / 2)  # valley() adds WIN / 2
+    # Hiss between the end of the word's voice and the cut (a quick breath,
+    # the "f" of a word being cut away) is not the word's own, unless the
+    # word ends in a hissing sound: cut where its voice ends.
+    k = ac.k(t)
+    if ac.db[k] < ac.floor + QUIET_DB and not _ends_hissing(word["word"]):
+        k0 = k
+        while k0 > ac.k(lo) and ac.db[k0 - 1] < ac.floor + QUIET_DB:
+            k0 -= 1
+        if (ac.db_hf[k0:k + 1] >= ac.floor_hf + QUIET_DB).any():
+            # The fade (centred on t) is all but over when the hiss starts.
+            t = max(lo, k0 * HOP - L["hard_fade"] / 2 + 0.005)
+    return {"t": t, "avail": 0.0, "hard": True}
 
 
 def in_point(ac: Acoustics, word: dict, lo: float | None, level: int) -> dict:
@@ -259,26 +342,39 @@ def in_point(ac: Acoustics, word: dict, lo: float | None, level: int) -> dict:
     # onset can come a little before its timestamp). Failing that, the word
     # may be led by a breath; keep the whole breath if a real pause precedes
     # it, rather than chopping it in half.
-    found = silence(onset - round(0.12 / HOP), m)
+    # Sound running straight into the word (within 120 ms, no real silence
+    # between) is the word's own start, e.g. the hiss of the "f" in "for",
+    # quiet overall and easy to mistake for a breath.
+    found, attached = silence(onset - round(0.12 / HOP), m), True
     if found is None:
-        found = silence(onset - round(0.6 / HOP), round(END_QUIET / HOP))
+        found, attached = silence(onset - round(0.6 / HOP), round(END_QUIET / HOP)), False
     if found is not None:
         t = found * HOP + WIN
         start = (found - bwd[found] + 1) * HOP
         # "speech" is where the word itself starts; anything between t and
         # speech is a breath, which counts as part of the pause.
         return {"t": t, "avail": max(0.0, t - start - L["margin"]), "hard": False,
-                "speech": max(t, onset * HOP)}
+                "speech": t if attached else max(t, onset * HOP)}
     if onset * HOP <= L["margin"] or (lo is None and q[: onset].all()):
         return {"t": onset * HOP, "avail": onset * HOP, "hard": False, "speech": onset * HOP}
-    t = ac.valley(word["start"] - 0.10, word["start"] + 0.03)
+    hi = word["start"] + 0.03
+    t = ac.valley(word["start"] - 0.10, hi)
+    limit = _sound_before(ac, t) + _clearance(L)
+    if ac.db[ac.k(t)] < ac.floor + QUIET_DB and t < limit and limit < hi:
+        t = ac.valley(limit, hi)
     return {"t": t, "avail": 0.0, "hard": True, "speech": t}
 
 
-def _punct(word: dict) -> str:
+def _punct(word: dict, book: str = "") -> str:
+    """Pause class after a word: "¶" paragraph end, "." sentence end, "("
+    edge of an aside, "," clause end, "" none. The transcript's own
+    punctuation, raised to the book's where that is known."""
     w = word["word"].rstrip("\"'”’)]")
-    p = w[-1:] if w else ""
-    return PUNCT.get(p, "")
+    p = PUNCT.get(w[-1:] if w else "", "")
+    return book if RANK[book] > RANK[p] else p
+
+
+RANK = {"": 0, ",": 1, "(": 2, ".": 3, "¶": 4}
 
 
 def gap(a: dict, b: dict) -> float:
@@ -294,6 +390,8 @@ DEFAULT_RHYTHM = {
     ".": {"typ": 0.6, "long": 0.8, "max": 1.1},
     ",": {"typ": 0.3, "long": 0.4, "max": 0.6},
     "": {"typ": 0.05, "long": 0.12, "max": 0.35},
+    "(": {"typ": 0.35, "long": 0.5, "max": 0.7},
+    "¶": {"typ": 0.9, "long": 1.2, "max": 1.6},
 }
 
 
@@ -304,31 +402,53 @@ def rhythm_of(gaps: dict[str, list[float]]) -> dict[str, dict]:
     sounding like a mistake."""
     out = {}
     for cls, dflt in DEFAULT_RHYTHM.items():
+        cap = PARA_PAUSE if cls == "¶" else MAX_PAUSE
         g = np.array([x for x in gaps.get(cls, []) if x < 3.0])
         if len(g) < 8:
             out[cls] = dict(dflt, n=int(len(g)))
             continue
         typ, p90, p97 = np.percentile(g, [50, 90, 97])
-        out[cls] = {"typ": float(min(typ, MAX_PAUSE)),
-                    "long": float(min(p90, MAX_PAUSE)),
-                    "max": float(min(max(p97, typ + 0.25), MAX_PAUSE)),
+        out[cls] = {"typ": float(min(typ, cap)),
+                    "long": float(min(p90, cap)),
+                    "max": float(min(max(p97, typ + 0.25), cap)),
                     "n": int(len(g))}
+    s, p = out["."], out["¶"]
+    if p["n"] < 8:
+        # Too few paragraph ends to measure (a short chapter): about twice
+        # the reader's sentence pause, with twice the spread.
+        typ = max(s["long"], 2 * s["typ"])
+        long = typ + 2 * (s["long"] - s["typ"])
+        out["¶"] = {"typ": min(typ, PARA_PAUSE), "long": min(long, PARA_PAUSE),
+                    "max": min(long + 2 * (s["max"] - s["long"]) + 0.1, PARA_PAUSE), "n": p["n"]}
+    c, a = out[","], out["("]
+    if a["n"] < 8:
+        # Too few asides to measure: a little more than a comma.
+        typ = max(c["long"], 1.5 * c["typ"])
+        out["("] = {"typ": typ, "long": typ + 1.5 * (c["long"] - c["typ"]),
+                    "max": typ + 1.5 * (c["max"] - c["typ"]), "n": a["n"]}
+    # Each kind of break gets at least the room of the weaker ones.
+    for weak, strong in ((",", "("), (".", "¶")):
+        out[strong] = {k: max(v, out[weak][k]) if k != "n" else v for k, v in out[strong].items()}
     return out
 
 
-def pacing(out: np.ndarray, spans: list[tuple[dict, float, float]], rhythm: dict) -> list[dict]:
+def pacing(out: np.ndarray, spans: list[tuple], rhythm: dict) -> list[dict]:
     """Pauses in the finished audio that fall outside the reader's own range.
 
-    spans: each kept word, in order, with its start and end in the output.
+    spans: each kept word, in order, with its start and end in the output,
+    and optionally its pause class (see _punct; None: not scored, as inside
+    a conversation).
     This measures the result itself, so it catches odd pauses wherever they
     come from: at a cut or in the original reading.
     """
     ac = Acoustics(out)
     flags = []
-    for (w1, s1, e1), (w2, s2, e2) in zip(spans, spans[1:]):
+    for (w1, s1, e1, *c1), (w2, s2, e2, *_) in zip(spans, spans[1:]):
+        cls = c1[0] if c1 else _punct(w1)
+        if cls is None:
+            continue
         a = out_point(ac, {"word": w1["word"], "start": s1, "end": min(e1, s2)}, s2, 0)
         b = in_point(ac, {"word": w2["word"], "start": s2, "end": e2}, s1, 0)
-        cls = _punct(w1)
         g = gap(a, b)
         if g > rhythm[cls]["max"] + 0.05:
             flags.append({"time": round(a["t"], 2), "gap": round(g, 2),
@@ -340,9 +460,23 @@ def pacing(out: np.ndarray, spans: list[tuple[dict, float, float]], rhythm: dict
 # ---------- render ----------
 
 def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
-           levels: dict[str, int] | None = None) -> tuple[np.ndarray, dict]:
-    """The cleaned chapter, and a report of every run and join in it."""
+           levels: dict[str, int] | None = None,
+           breaks: dict[int, str] | None = None,
+           analysis: list[np.ndarray] | None = None,
+           intact: set[int] | None = None) -> tuple[np.ndarray, dict]:
+    """The cleaned chapter, and a report of every run and join in it.
+
+    breaks: sentence (".") and paragraph ("¶") ends and the edges of asides
+    ("(") from the book, by word index (the alignment's "breaks").
+    analysis: the original recordings, when `audios` are enhanced masters
+    (see Acoustics).
+    intact: words whose following pause stays exactly as recorded: the inside
+    of a conversation, where a quiet child's half of it may be in what sounds
+    like a pause. These pauses don't count toward the reader's rhythm either."""
     levels = levels or {}
+    breaks = breaks or {}
+    intact = intact or set()
+    cls = lambda i: _punct(words[i], breaks.get(i, ""))
     rs = runs(words, keep)
     if not rs:
         return np.zeros(0, dtype=np.float32), {"chunks": [], "joins": []}
@@ -350,7 +484,7 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
 
     def ac(part):
         if part not in acs:
-            acs[part] = Acoustics(audios[part])
+            acs[part] = Acoustics(audios[part], analysis[part] if analysis else None)
         return acs[part]
 
     def neighbours(i):
@@ -361,20 +495,21 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
 
     # Measure the reader's pacing on every pair of kept neighbours, and split
     # runs where a pause is too long to sound like reading.
-    measured, gaps = {}, {".": [], ",": [], "": []}
+    measured, gaps = {}, {c: [] for c in DEFAULT_RHYTHM}
     for first, last in rs:
         a_c = ac(words[first]["part"])
         for i in range(first, last):
             a = out_point(a_c, words[i], words[i + 1]["start"], 0)
             b = in_point(a_c, words[i + 1], words[i]["start"], 0)
             measured[i] = gap(a, b)
-            gaps[_punct(words[i])].append(measured[i])
+            if i not in intact:
+                gaps[cls(i)].append(measured[i])
     rhythm = rhythm_of(gaps)
     split = []
     for first, last in rs:
         start = first
         for i in range(first, last):
-            if measured[i] > rhythm[_punct(words[i])]["max"]:
+            if i not in intact and measured[i] > rhythm[cls(i)]["max"]:
                 split.append((start, i))
                 start = i + 1
         split.append((start, last))
@@ -408,17 +543,25 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
         wa, wb = words[rs[r][1]], words[rs[r + 1][0]]
         same = wa["part"] == wb["part"]
         consecutive = same and rs[r + 1][0] == rs[r][1] + 1
-        R = rhythm[_punct(wa)]
+        c_ = cls(rs[r][1])
+        R = rhythm[c_]
+        breath = max(0.0, B["speech"] - B["t"])
         if consecutive:
             # One of the reader's own pauses, too long to sound like reading:
             # shorten it to the long end of normal, keeping some emphasis.
             want = max(R["long"], 0.8 * R["max"])
-        else:  # a cut: the reader's usual pause here
+        elif c_ in ("(", ".", "¶"):
+            # A cut at the end of a sentence or paragraph, or at the edge of
+            # an aside: if the reader left
+            # a long silence there, let some of it breathe; if they ran
+            # straight on, the usual pause.
+            dead = A["avail"] + breath + B["avail"]
+            want = min(max(dead, R["typ"]), R["long"])
+        else:  # a cut mid-sentence: dead air goes, the reader's usual pause
             want = R["typ"]
-        want = min(MAX_PAUSE, want * L["pace"])
+        want = min(PARA_PAUSE if c_ == "¶" else MAX_PAUSE, want * L["pace"])
         # A breath before the next word is part of the pause. If it alone
         # would make the pause too long, leave it out.
-        breath = max(0.0, B["speech"] - B["t"])
         if breath > 0.05 and breath > want - MIN_FILL:
             c = ac(wb["part"])
             t = c.valley(B["speech"] - 0.04, B["speech"] + 0.005)
@@ -488,7 +631,7 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
             "key": keys[r], "kind": kind, "level": lvl[r],
             "tight": bool(A["hard"] or B["hard"]),
             "start": round(a_end, 3), "end": round(max(b_on, a_end), 3),
-            "pause": round(pauses[r], 2),
+            "pause": round(pauses[r], 2), "break": cls(wa),
             "words": [words[wa]["word"], words[wb]["word"]],
             "before": [w["word"] for w in words[max(rs[r][0], wa - 2):wa + 1]],
             "after": [w["word"] for w in words[wb:min(rs[r + 1][1], wb + 2) + 1]],
@@ -498,7 +641,8 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
     spans = []
     for r, (first, last) in enumerate(rs):
         for i in range(first, last + 1):
-            spans.append((words[i], words[i]["start"] + run_pos[r], words[i]["end"] + run_pos[r]))
+            spans.append((words[i], words[i]["start"] + run_pos[r], words[i]["end"] + run_pos[r],
+                          None if i in intact else cls(i)))
     return out, {"chunks": chunks, "joins": joins, "pacing": pacing(out, spans, rhythm),
                  "rhythm": {k or "word": {x: round(v, 2) for x, v in d.items()} for k, d in rhythm.items()}}
 

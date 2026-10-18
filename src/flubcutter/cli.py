@@ -161,7 +161,8 @@ def main() -> None:
                      for e in alignment["events"]}
         audio = edit.load(Path(transcript["audio"]))
         before = len(audio) / edit.RATE
-        cleaned, rep = edit.render([audio], words, edit.keep_set(alignment, decisions))
+        breaks = {int(i): c for i, c in alignment.get("breaks", {}).items()}
+        cleaned, rep = edit.render([audio], words, edit.keep_set(alignment, decisions), breaks=breaks)
         out = args.out or Path("output") / f"{Path(transcript['audio']).stem}.clean.wav"
         edit.write_wav(cleaned, out)
         after = len(cleaned) / edit.RATE
