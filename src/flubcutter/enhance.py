@@ -13,6 +13,10 @@ Two passes, at either end of the pipeline:
      (FLOOR_GAP), so the natural room tone survives: total silence between words sounds dead and
      makes every cut audible, and edit.py takes its pause fill from that room
      tone.
+   - Level the speech as it goes (`level_curve`): a slow gain that follows
+     the reading minute to minute, so a passage read close to the iPad and
+     one read leaning back come out alike, and one shout can't set the level
+     for the rest of the chapter.
    - Then ffmpeg: a highpass for rumble and handling noise, a light presence
      lift for clarity, a de-esser (the lift brings up sibilance too), and a
      gentle 2:1 compressor so soft and loud passages sit closer together.
@@ -56,8 +60,19 @@ PRE_ROLL = 3.0
 XFADE = 0.05
 
 SPEECH_DB = -20.0         # speech level going into the compressor, dBFS
+LEVEL_BLOCK = 3.0         # the speech level is measured in blocks this long, s
+LEVEL_WINDOW = 30.0       # and follows the median over this long, s: slow
+                          # enough not to pump, quick enough for a new seat
+LEVEL_RANGE = 24.0        # most the leveling turns a passage up or down, dB
+RIDE_FRAME = 0.1          # then a fast rider holds each second of speech there,
+RIDE_WINDOW = 1.0         # s: its level is the power of the voiced frames
+RIDE_LOOK = 0.4           # within RIDE_WINDOW; it starts turning down this
+                          # early, so a loud passage never comes through first
+RIDE_DOWN = 15.0          # most it turns a second down, dB
+RIDE_UP = 6.0             # and up (little, so word tails and breaths aren't raised)
 MASTER_LUFS = -20.0       # master level: near the final one, so it plays (and
                           # transcribes) like the finished chapter
+MASTER_PEAK = 0.9         # a limiter keeps the master's few loud peaks under this
 EQ = ",".join([
     "highpass=f=80:poles=2",
     "equalizer=f=4000:t=q:w=0.9:g=1.5",             # presence
@@ -70,7 +85,9 @@ TRUE_PEAK = -3.0          # dBTP ceiling
 LIMIT_MARGIN = 0.5        # limiter set this far below the ceiling, dB
 
 # Part of the cache key: change it whenever the master's processing changes.
-VERSION = f"2:{MODEL}:{MIN_ATTEN_DB}-{MAX_ATTEN_DB}/{FLOOR_GAP}:{SPEECH_DB}:{EQ}:{MASTER_LUFS}"
+VERSION = (f"4:{MODEL}:{MIN_ATTEN_DB}-{MAX_ATTEN_DB}/{FLOOR_GAP}:{SPEECH_DB}:"
+           f"{LEVEL_BLOCK}/{LEVEL_WINDOW}/{LEVEL_RANGE}:"
+           f"{RIDE_FRAME}/{RIDE_WINDOW}/{RIDE_LOOK}/{RIDE_DOWN}/{RIDE_UP}:{EQ}:{MASTER_LUFS}/{MASTER_PEAK}")
 
 
 # ---------- denoise ----------
@@ -175,16 +192,95 @@ def speech_level(audio: np.ndarray) -> float:
     return float(10 * np.log10(np.mean(10 ** (loud / 10))))
 
 
+def level_curve(audio: np.ndarray) -> np.ndarray:
+    """Per-sample gain that brings the speech to SPEECH_DB, moving slowly.
+
+    The speech level is the median of the voiced frames in each LEVEL_BLOCK
+    (a median, so a shout or a bang barely moves it), then the median over
+    LEVEL_WINDOW, smoothed; blocks with no speech take their neighbours'
+    level, so pauses and room tone aren't pulled up."""
+    ac = edit.Acoustics(audio)
+    per = max(1, int(LEVEL_BLOCK / edit.HOP))
+    n = len(ac.db) // per
+    if n == 0:
+        return np.full(len(audio), 10 ** ((SPEECH_DB - speech_level(audio)) / 20), np.float32)
+    blocks = ac.db[:n * per].reshape(n, per)
+    level = np.full(n, np.nan)
+    for i, b in enumerate(blocks):
+        voiced = b[b > ac.floor + 15]
+        if len(voiced) > per // 10:
+            level[i] = np.median(voiced)
+    if np.isnan(level).all():
+        return np.full(len(audio), 10 ** ((SPEECH_DB - speech_level(audio)) / 20), np.float32)
+    w = max(1, int(LEVEL_WINDOW / LEVEL_BLOCK) // 2)
+    med = np.array([np.nanmedian(level[max(0, i - w):i + w + 1]) if not np.isnan(level[max(0, i - w):i + w + 1]).all()
+                    else np.nan for i in range(n)])
+    have = ~np.isnan(med)
+    med = np.interp(np.arange(n), np.flatnonzero(have), med[have])
+    k = np.hanning(2 * w + 3)[1:-1]
+    smooth = np.convolve(np.pad(med, w, mode="edge"), k / k.sum(), mode="valid")[:n]
+    gain_db = np.clip(SPEECH_DB - smooth, -LEVEL_RANGE, LEVEL_RANGE)
+    centres = (np.arange(n) + 0.5) * per * edit.HOP * RATE
+    return (10 ** (np.interp(np.arange(len(audio)), centres, gain_db) / 20)).astype(np.float32)
+
+
+def ride(audio: np.ndarray) -> np.ndarray:
+    """Per-sample gain that holds each second of speech at SPEECH_DB.
+
+    `level_curve` follows the reading over half a minute, so a loud stretch
+    of a few seconds (a voice, a laugh, leaning in) came through as a surge.
+    This follows the voiced power over RIDE_WINDOW instead, mostly turning
+    down; the gain is the lowest within RIDE_LOOK either side, so it is
+    already down when the loud part starts, and it holds through pauses."""
+    ac = edit.Acoustics(audio)
+    per = max(1, int(round(RIDE_FRAME / edit.HOP)))
+    n = len(ac.db) // per
+    if n == 0:
+        return np.ones(len(audio), np.float32)
+    power = (10 ** (ac.db[:n * per] / 10)).reshape(n, per).mean(1)
+    voiced = 10 * np.log10(power + 1e-12) > ac.floor + 15
+    w = int(RIDE_WINDOW / RIDE_FRAME) // 2
+    sums = np.concatenate([[0], np.cumsum(np.where(voiced, power, 0))])
+    counts = np.concatenate([[0], np.cumsum(voiced)])
+    lo, hi = np.clip(np.arange(n) - w, 0, n), np.clip(np.arange(n) + w + 1, 0, n)
+    count = counts[hi] - counts[lo]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        level = np.where(count >= 3, 10 * np.log10((sums[hi] - sums[lo]) / count + 1e-12), np.nan)
+    gain_db = np.clip(SPEECH_DB - level, -RIDE_DOWN, RIDE_UP)
+    have = ~np.isnan(gain_db)
+    if not have.any():
+        return np.ones(len(audio), np.float32)
+    gain_db = np.interp(np.arange(n), np.flatnonzero(have), gain_db[have])
+    look = int(RIDE_LOOK / RIDE_FRAME)
+    gain_db = np.lib.stride_tricks.sliding_window_view(np.pad(gain_db, look, mode="edge"), 2 * look + 1).min(1)
+    k = np.hanning(2 * look + 3)[1:-1]
+    gain_db = np.convolve(np.pad(gain_db, look, mode="edge"), k / k.sum(), mode="valid")[:n]
+    centres = (np.arange(n) + 0.5) * per * edit.HOP * RATE
+    return (10 ** (np.interp(np.arange(len(audio)), centres, gain_db) / 20)).astype(np.float32)
+
+
 def polish(audio: np.ndarray) -> np.ndarray:
-    """Highpass, presence, de-ess and compress. The compressor's threshold
-    is fixed, so the speech is first brought to a set level (SPEECH_DB)."""
-    gain = 10 ** ((SPEECH_DB - speech_level(audio)) / 20)
-    out = _fit(_ffmpeg(audio * gain, EQ), len(audio))
-    # Then to the master level, short of clipping (the master is saved as 16-bit).
+    """Level, highpass, presence, de-ess and compress. The compressor's
+    threshold is fixed, so the speech is first brought to a set level
+    (SPEECH_DB), followed minute to minute by `level_curve` and second to
+    second by `ride`."""
+    audio = audio * level_curve(audio)
+    gain = ride(audio)
+    # The de-esser goes unstable on samples past full scale (a decoded shout
+    # can reach 3x), so those are clipped first, as a recorder would have.
+    out = _fit(_ffmpeg(np.clip(audio * gain, -1.0, 1.0), EQ), len(audio))
+    # Then to the master level. One shout or bang can peak 30 dB over the
+    # speech, so scaling until that peak fits would bury the reading; a
+    # limiter takes those few peaks down instead (the master is saved as 16-bit).
     lufs, peak = measure(out)["lufs"], float(np.max(np.abs(out), initial=0.0))
     if not np.isfinite(lufs) or peak == 0:
         return out
-    return out * np.float32(min(10 ** ((MASTER_LUFS - lufs) / 20), 0.9 / peak))
+    gain = np.float32(10 ** ((MASTER_LUFS - lufs) / 20))
+    out = out * gain
+    if peak * gain > MASTER_PEAK:
+        out = _fit(_ffmpeg(out, f"aresample=192000,alimiter=limit={MASTER_PEAK}:attack=1:"
+                                f"release=60:level=disabled,aresample={RATE}"), len(audio))
+    return np.clip(out, -1.0, 1.0)
 
 
 def _fit(x: np.ndarray, n: int) -> np.ndarray:

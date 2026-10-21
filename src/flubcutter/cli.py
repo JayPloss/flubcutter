@@ -1,4 +1,6 @@
 import argparse
+import os
+import subprocess
 import json
 import shutil
 from pathlib import Path
@@ -73,6 +75,10 @@ def main() -> None:
     s.add_argument("--app", action="store_true",
                    help="open it in its own window; reuse the server if it is already running")
 
+    pl = sub.add_parser("player", help="run the household player (finished chapters, any device at home)")
+    pl.add_argument("--port", type=int, default=8650)
+    pl.add_argument("--host", default="0.0.0.0", help="default: every network on this computer")
+
     sub.add_parser("install-desktop", help="add Flubcutter to the desktop app launcher")
 
     d = sub.add_parser("demo", help="add a sample book (Alice) to the library")
@@ -97,6 +103,10 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.command == "serve":
+        # Renders keep every core busy for minutes; at idle priority they
+        # give way to whatever is playing on this machine (Story Shelf).
+        os.nice(19)
+        subprocess.run(["ionice", "-c3", "-p", str(os.getpid())], check=False)
         import threading
 
         url = f"http://127.0.0.1:{args.port}/"
@@ -114,6 +124,12 @@ def main() -> None:
         if args.open or args.app:
             threading.Timer(1.5, _open, [url, args.app]).start()
         uvicorn.run(create_app(lib), host="127.0.0.1", port=args.port, log_level="warning")
+
+    elif args.command == "player":
+        from flubcutter.library import Library
+        from flubcutter.player import serve
+
+        serve(Library(args.library), args.host, args.port)
 
     elif args.command == "install-desktop":
         _install_desktop()

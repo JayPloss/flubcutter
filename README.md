@@ -30,7 +30,9 @@ conversations with the listeners.
    first); everything else is accepted as suggested. In the web app you see
    the waveform with every edit highlighted, hear each one with pre-roll and
    post-roll ("play with cut" vs "play original"), and change it, mostly
-   with the keyboard. Once nothing needs you, the chapter renders by itself.
+   with the keyboard. The chapter renders by itself as soon as it is processed, using
+   the best guess for anything still waiting for you, and again after each decision,
+   so Story Shelf (`flubcutter player`) always has the latest version.
 5. **Render**: every cut is placed by measuring the audio rather than
    trusting the word timestamps (which are only good to ~80 ms):
    - the real start and end of each kept word come from a 5 ms loudness

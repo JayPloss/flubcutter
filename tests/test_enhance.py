@@ -102,3 +102,38 @@ def test_denoise_lowers_floor_keeps_timing_and_chunks_join(monkeypatch):
     chunked = enhance.denoise(x, 20.0)
     err = np.sum((chunked - whole) ** 2) / np.sum(whole ** 2)
     assert 10 * np.log10(err) < -20
+
+
+def test_one_loud_bang_does_not_bury_the_reading():
+    rate = enhance.RATE
+    t = np.arange(rate * 20) / rate
+    speech = (0.05 * np.sin(2 * np.pi * 220 * t) * (np.sin(2 * np.pi * 0.5 * t) > 0)).astype(np.float32)
+    loud = speech.copy()
+    loud[rate * 10:rate * 10 + 200] = 3.0  # a bang far over full scale
+    level = lambda x: 20 * np.log10(np.sqrt(np.mean(x[:rate * 9] ** 2)))
+    a, b = enhance.polish(speech), enhance.polish(loud)
+    assert np.abs(b).max() <= 1.0
+    assert abs(level(a) - level(b)) < 3
+
+
+def test_a_quiet_passage_is_brought_up_to_the_loud_one():
+    rate = enhance.RATE
+    t = np.arange(rate * 120) / rate
+    voice = np.sin(2 * np.pi * 220 * t) * (np.sin(2 * np.pi * 0.5 * t) > 0)
+    x = (voice * np.where(t < 60, 0.1, 0.01)).astype(np.float32)  # second minute 20 dB softer
+    x += np.random.default_rng(0).normal(0, 1e-4, len(x)).astype(np.float32)
+    out = enhance.polish(x)
+    level = lambda a: 20 * np.log10(np.sqrt(np.mean(a ** 2)))
+    assert abs(level(out[rate * 10:rate * 40]) - level(out[rate * 80:rate * 110])) < 3
+
+
+def test_a_few_loud_seconds_do_not_surge():
+    rate = enhance.RATE
+    t = np.arange(rate * 60) / rate
+    voice = np.sin(2 * np.pi * 220 * t) * (np.sin(2 * np.pi * 2 * t) > 0)
+    loud = (t > 30) & (t < 36)  # six seconds 12 dB up: too short for the minute leveling
+    x = (voice * np.where(loud, 0.4, 0.1)).astype(np.float32)
+    x += np.random.default_rng(0).normal(0, 1e-4, len(x)).astype(np.float32)
+    out = enhance.polish(x)
+    level = lambda a: 20 * np.log10(np.sqrt(np.mean(a ** 2)))
+    assert level(out[rate * 30:rate * 36]) - level(out[rate * 15:rate * 25]) < 3

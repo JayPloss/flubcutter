@@ -13,6 +13,8 @@ import traceback
 from flubcutter.library import Library
 
 KINDS = ("transcribe", "align", "judge", "render", "process")
+# Stages where a render can run: the machine work is done.
+RENDERABLE = ("needs you", "not rendered", "out of date", "ready")
 
 
 class Jobs:
@@ -62,11 +64,12 @@ class Jobs:
         mine.sort(key=lambda j: (j["state"] != "running", j["id"]))
         return {k: mine[0][k] for k in ("id", "kind", "state", "step", "progress")} if mine else None
 
-    def render_if_settled(self, book: str, chapter: str) -> dict | None:
-        """Queue a render once nothing waits for a person and the cleaned
-        audio is missing or older than the decisions."""
+    def render_if_stale(self, book: str, chapter: str) -> dict | None:
+        """Queue a render whenever the cleaned audio is missing or older than
+        the decisions. Edits still waiting for a person render with the best
+        guess, so the household player always has the latest version."""
         st = self.lib.status(book, self.lib.chapter(self.lib.book(book), chapter))
-        if st["stage"] in ("not rendered", "out of date"):
+        if st["stage"] in RENDERABLE and not st["rendered"]:
             return self.submit("render", book, chapter)
         return None
 
@@ -145,4 +148,4 @@ class Jobs:
             self._judge(b, c, lambda f: progress(0.9 + 0.1 * f, "AI judging"))
         progress(1.0, "done")
         # Nothing needs a person: go straight on to the cleaned audio.
-        self.render_if_settled(b, c)
+        self.render_if_stale(b, c)

@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from flubcutter import __version__, importers, judge
 from flubcutter.align import book_context
-from flubcutter.jobs import Jobs
+from flubcutter.jobs import RENDERABLE, Jobs
 from flubcutter.library import AUDIO_EXTS, CANDIDATES, EDITIONS, Library
 
 STATIC = Path(__file__).parent / "static"
@@ -79,7 +79,8 @@ def create_app(lib: Library) -> FastAPI:
     @app.post("/api/books/{b}/process")
     def process_book(b: str):
         """Queue every chapter that still needs machine work: processing (which
-        renders by itself when nothing needs a person) or just a render."""
+        renders by itself, with best guesses for anything still waiting for a
+        person) or just a render."""
         book = book_or_404(b)
         queued = []
         for ch in book["chapters"]:
@@ -88,7 +89,7 @@ def create_app(lib: Library) -> FastAPI:
                 continue
             if st["stage"] in ("to transcribe", "to align", "to judge"):
                 queued.append(jobs.submit("process", b, ch["id"]))
-            elif st["stage"] in ("not rendered", "out of date"):
+            elif st["stage"] in RENDERABLE and not st["rendered"]:
                 queued.append(jobs.submit("render", b, ch["id"]))
         return {"queued": len(queued)}
 
@@ -250,14 +251,14 @@ def create_app(lib: Library) -> FastAPI:
     def put_decisions(b: str, c: str, changes: dict[str, str | None] = Body(...)):
         chapter_or_404(b, c)
         r = lib.set_decisions(b, c, changes)
-        return {"decisions": r["decisions"], "render": jobs.render_if_settled(b, c)}
+        return {"decisions": r["decisions"], "render": jobs.render_if_stale(b, c)}
 
     @app.put("/api/books/{b}/chapters/{c}/kinds")
     def put_kinds(b: str, c: str, changes: dict[str, str | None] = Body(...)):
         """Mark extra speech as an "aside" or a "flub" (null: the AI's call)."""
         chapter_or_404(b, c)
         r = lib.set_kinds(b, c, changes)
-        return {"kinds": r.get("kinds", {}), "render": jobs.render_if_settled(b, c)}
+        return {"kinds": r.get("kinds", {}), "render": jobs.render_if_stale(b, c)}
 
     @app.get("/api/books/{b}/chapters/{c}/parts/{p}/peaks")
     def peaks(b: str, c: str, p: str):
