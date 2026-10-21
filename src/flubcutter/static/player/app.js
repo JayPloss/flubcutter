@@ -217,7 +217,7 @@ function play(b, ch) {
 function load(b, ch, ed, start, autoplay) {
   if (current) persist();
   current = { book: b, ch, ed };
-  audio.src = `/audio/${b.id}/${ch.id}/${ed}`;
+  audio.src = `/audio/${b.id}/${ch.id}/${ed}?v=${Math.floor(ch.editions[ed].at)}`;
   audio.playbackRate = state.speed || 1;
   showTime(start);
   audio.addEventListener("loadedmetadata", () => {
@@ -258,6 +258,18 @@ function persist() {
 }
 
 const nextOf = ({ book: b, ch }) => b.chapters.slice(b.chapters.indexOf(ch) + 1).find(ready);
+
+// A stream that breaks (the server restarted, or a copy this old was cleared)
+// picks up again where it was, on the newest render.
+audio.addEventListener("error", async () => {
+  if (!current || audio.dataset.retry > 2) return;
+  audio.dataset.retry = +(audio.dataset.retry || 0) + 1;
+  const { book: b, ch, ed } = current, t = audio.currentTime;
+  try { books = (await fetch("/api/library").then((r) => r.json())).books; } catch { return; }
+  const nb = bookOf(b.id), nc = nb?.chapters.find((c) => c.id === ch.id);
+  if (nc?.editions[ed]) load(nb, nc, ed, t, true);
+});
+audio.addEventListener("playing", () => { audio.dataset.retry = 0; });
 
 audio.addEventListener("play", () => { $("player").classList.add("playing"); renderMain(); });
 audio.addEventListener("pause", () => { $("player").classList.remove("playing"); persist(); refresh(); });

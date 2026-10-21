@@ -75,6 +75,9 @@ def duration(path: Path) -> float:
     return _durations[key]
 
 
+KEEP_OLD = 24 * 3600  # s an old AAC copy outlives its replacement
+
+
 def cached(src: Path, book: str, chapter: str, edition: str) -> Path:
     """Where the AAC copy of a rendered chapter lives; the name carries the WAV's mtime."""
     return CACHE / book / edition / f"{chapter}.{int(src.stat().st_mtime)}.m4a"
@@ -117,9 +120,13 @@ def transcode_all(lib: Library) -> None:
                                     "-b:a", "80k", "-movflags", "+faststart", str(tmp)])
                 if r.returncode == 0:
                     tmp.replace(dst)
-                    for old in dst.parent.glob(f"{ch['id']}.*.m4a"):
-                        if old != dst:
-                            old.unlink(missing_ok=True)
+        # Older copies stay a day: a window playing one keeps asking for it
+        # by version, so a new render doesn't pull the audio out from under it.
+        for old in CACHE.glob("*/*/*.m4a"):
+            if ".part." not in old.name and time.time() - old.stat().st_mtime > KEEP_OLD:
+                newest = max(old.parent.glob(f"{old.name.split('.')[0]}.*.m4a"), key=lambda f: f.stat().st_mtime)
+                if old != newest:
+                    old.unlink(missing_ok=True)
 
 
 def load_state() -> dict:
@@ -197,6 +204,9 @@ def make_handler(lib: Library):
                 if not src.exists():
                     return self.send_error(404)
                 aac = cached(src, b, c, ed)
+                v = re.search(r"[?&]v=(\d+)", self.path)
+                if v and (pinned := aac.with_name(f"{c}.{v[1]}.m4a")).exists():
+                    aac = pinned  # the version this window started playing
                 return self._file(aac if aac.exists() else src, cache=aac.exists())
             self.send_error(404)
 
