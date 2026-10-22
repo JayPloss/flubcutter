@@ -82,3 +82,13 @@ def test_long_chapter_uses_anchors_and_finds_every_flub(monkeypatch):
     assert len(calls) > 1, "expected the alignment to be split at anchors"
     assert r["coverage"] == 1.0
     assert sorted(events_of(r, "restart", "extra")) == sorted(truth)
+
+
+def test_a_yawn_transcribed_as_yeah_in_place_of_book_words_is_extra():
+    # The book says "to the left"; a yawn came out as "Yeah. Yeah." over "to the".
+    book = "column two. To the left of this paper sat another"
+    spoken = "column two. Yeah. Yeah. left of this paper sat another".split()
+    r = analyze(words_from(spoken), book)
+    assert [e["text"] for e in r["events"] if e["type"] == "extra"] == ["Yeah.", "Yeah."]
+    assert 2 not in r["kept_words"] and 3 not in r["kept_words"]
+    assert not [e for e in r["events"] if e["type"] == "sub"]

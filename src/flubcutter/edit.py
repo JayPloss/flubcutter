@@ -463,7 +463,7 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
            levels: dict[str, int] | None = None,
            breaks: dict[int, str] | None = None,
            analysis: list[np.ndarray] | None = None,
-           intact: set[int] | None = None) -> tuple[np.ndarray, dict]:
+           intact: set[int] | None = None, cut_after: set[int] | None = None) -> tuple[np.ndarray, dict]:
     """The cleaned chapter, and a report of every run and join in it.
 
     breaks: sentence (".") and paragraph ("¶") ends and the edges of asides
@@ -472,10 +472,14 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
     (see Acoustics).
     intact: words whose following pause stays exactly as recorded: the inside
     of a conversation, where a quiet child's half of it may be in what sounds
-    like a pause. These pauses don't count toward the reader's rhythm either."""
+    like a pause. These pauses don't count toward the reader's rhythm either.
+    cut_after: words whose following pause is cut out whatever it sounds like
+    (a yawn or a cough with no words, judged a flub), and rebuilt like a
+    pause of the reader's that ran too long."""
     levels = levels or {}
     breaks = breaks or {}
     intact = intact or set()
+    cut_after = cut_after or set()
     cls = lambda i: _punct(words[i], breaks.get(i, ""))
     rs = runs(words, keep)
     if not rs:
@@ -502,14 +506,14 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
             a = out_point(a_c, words[i], words[i + 1]["start"], 0)
             b = in_point(a_c, words[i + 1], words[i]["start"], 0)
             measured[i] = gap(a, b)
-            if i not in intact:
+            if i not in intact and i not in cut_after:
                 gaps[cls(i)].append(measured[i])
     rhythm = rhythm_of(gaps)
     split = []
     for first, last in rs:
         start = first
         for i in range(first, last):
-            if i not in intact and measured[i] > rhythm[cls(i)]["max"]:
+            if i in cut_after or (i not in intact and measured[i] > rhythm[cls(i)]["max"]):
                 split.append((start, i))
                 start = i + 1
         split.append((start, last))

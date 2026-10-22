@@ -10,6 +10,7 @@ A chapter may be recorded in several parts. Words carry a "part" index and
 part-local times; the alignment runs over all parts in order.
 """
 
+import difflib
 import json
 import re
 from collections import Counter
@@ -28,6 +29,18 @@ ANCHOR_N = 6
 PIECE_WORDS = 1500
 
 FILLERS = {"um", "uh", "umm", "uhh", "er", "erm", "ah", "hmm", "mm", "mhm"}
+# What a yawn, a sigh or a cough is often transcribed as. Lined up against a
+# different book word, it is not that word misread: it is extra sound (and
+# the book word was likely swallowed with it), so the judge decides it.
+INTERJECTIONS = FILLERS | {"yeah", "yes", "oh", "ooh", "aah", "huh", "ha", "okay", "ok", "hm", "mmm", "oof", "ugh", "whoa", "wow"}
+
+
+def _interjection_for(said: str, book_word: str) -> bool:
+    """Whether a spoken word lined up against a book word is an interjection
+    standing in for it rather than that word misheard ("yes" for "yet")."""
+    toks = normalize(said)
+    return bool(toks) and all(t in INTERJECTIONS for t in toks) and book_word not in INTERJECTIONS \
+        and difflib.SequenceMatcher(None, "".join(toks), book_word).ratio() < 0.5
 
 
 def normalize(text: str) -> list[str]:
@@ -299,6 +312,12 @@ def analyze(words: list[dict], book_text: str) -> dict:
                     "book_index": next_book,
                 })
             continue
+        if kind == SUB and _interjection_for(words[owner[s]]["word"], book[b]):
+            w = words[owner[s]]
+            events.append({"type": "extra", "part": w["part"], "text": w["word"], "start": w["start"],
+                           "end": w["end"], "words": [owner[s]], "book_index": b, "stands_for": book[b]})
+            k += 1
+            continue
         if kind == SUB:
             w = words[owner[s]]
             events.append({"type": "sub", "part": w["part"], "said": w["word"], "book": book[b],
@@ -326,12 +345,14 @@ def analyze(words: list[dict], book_text: str) -> dict:
         if first_of_part and w["start"] > LONG_GAP:
             events.append({"type": "gap", "part": w["part"], "start": 0.0, "end": w["start"],
                            "seconds": round(w["start"], 2)})
+    book_of = {owner[s]: b for _, b, s in ops if b is not None and s is not None}
     for a, b in zip(kept, kept[1:]):
         if b == a + 1 and words[a]["part"] == words[b]["part"]:
             gap = words[b]["start"] - words[a]["end"]
             if gap > LONG_GAP:
                 events.append({"type": "gap", "part": words[a]["part"], "start": words[a]["end"],
-                               "end": words[b]["start"], "seconds": round(gap, 2)})
+                               "end": words[b]["start"], "seconds": round(gap, 2),
+                               "between": [a, b], "book_index": book_of.get(b, 0)})
 
     events.sort(key=lambda e: (e.get("part", 1 << 30), e.get("start", 0.0)))
     for e in events:
@@ -379,6 +400,8 @@ def report(result: dict) -> str:
                 lines.append(f"{t}  MISSING  \"{e['book']}\" not read")
             case "gap":
                 lines.append(f"{t}  GAP      {e['seconds']}s of silence")
+            case "noise":
+                lines.append(f"{t}  NOISE    review: {e['sound']}s of sound, no words")
     return "\n".join(lines)
 
 

@@ -298,3 +298,15 @@ def test_the_hiss_of_a_word_starting_with_f_is_not_a_breath():
     words = [W("slowly,", 1.0, 1.4), W("um", 2.0, 2.4), W("for", 3.1, 3.4)]
     _, rep = edit.render([audio], words, {0, 2})
     assert rep["joins"][0]["source"][1]["t"] <= 3.01
+
+
+def test_a_cut_noise_takes_the_yawn_out_of_the_pause():
+    # "a." then three seconds of yawn running straight on from it, then "b".
+    audio = recording([(1.0, 1.4), (4.4, 4.8)])
+    audio[int(1.4 * R):int(4.3 * R)] += tone(2.9, amp=0.05, freq=140.0)
+    words = [W("a.", 1.0, 1.4), W("b", 4.4, 4.8)]
+    kept, _ = edit.render([audio], words, {0, 1})
+    out, rep = edit.render([audio], words, {0, 1}, cut_after={0})
+    assert len(kept) / R - len(out) / R > 2.0
+    (j,) = rep["joins"]
+    assert j["kind"] == "pause" and j["pause"] < 1.2

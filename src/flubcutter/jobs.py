@@ -114,7 +114,7 @@ class Jobs:
         if a is None:
             raise RuntimeError("align the chapter first")
         review = self.lib.review(b, c)
-        todo = [e for e in a["events"] if e["type"] == "extra"
+        todo = [e for e in a["events"] if e["type"] in ("extra", "noise")
                 and e["id"] not in review["ai"] and e["id"] not in review["decisions"]]
         if not todo:
             return
@@ -141,7 +141,8 @@ class Jobs:
             part_progress(0.0)
             lib.run_transcribe(b, c, p["id"], progress=part_progress)
         progress(0.86, "aligning")
-        if lib.alignment(b, c) is None:
+        a = lib.alignment(b, c)
+        if a is None or not a.get("noise_checked"):  # aligned before noises were found
             lib.run_align(b, c)
         if judge.available():
             progress(0.9, "AI judging")

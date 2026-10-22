@@ -4,7 +4,8 @@ import TimelinePlugin from "/static/vendor/wavesurfer/plugins/timeline.esm.js";
 import MinimapPlugin from "/static/vendor/wavesurfer/plugins/minimap.esm.js";
 import { api, fmtTime, guard, h, MACHINE, pollJobs, setCrumbs, statusOf, statusTag, submitJob, toast } from "./app.js";
 
-const TYPE_LABEL = { restart: "Restart", filler: "Filler", extra: "Extra speech" };
+const TYPE_LABEL = { restart: "Restart", filler: "Filler", extra: "Extra speech", noise: "Sound, no words" };
+const judged = (e) => e.type === "extra" || e.type === "noise";
 // Extra speech is either a flub or an aside: unscripted talk that was meant
 // (a chat with the kids, a joke). Asides are in the Extended edition only.
 const typeLabel = (e) => (e.kind === "aside" ? "Aside" : TYPE_LABEL[e.type] || e.type);
@@ -817,7 +818,7 @@ async function decide(e, decision) {
 // Flub or aside: what this extra speech is. Back to the AI's call if it
 // already says so.
 async function toggleKind(e) {
-  if (!e || e.type !== "extra") return;
+  if (!e || !judged(e)) return;
   const want = isAside(e) ? "flub" : "aside";
   const ai = e.ai_kind ?? null;
   await guard(async () => {
@@ -942,8 +943,10 @@ function renderDetail() {
   }
   const eff = effective(e);
   const words = S.data.parts[e.part].words;
-  const first = words.findIndex((w) => w.i === e.words[0]);
-  const last = words.findIndex((w) => w.i === e.words[e.words.length - 1]);
+  // A noise has no words: its context is either side of the pause.
+  const [i0, i1] = e.words.length ? [e.words[0], e.words[e.words.length - 1]] : [e.between[1], e.between[0]];
+  const first = words.findIndex((w) => w.i === i0);
+  const last = words.findIndex((w) => w.i === i1);
   const before = words.slice(Math.max(0, first - 18), first).map((w) => w.word).join(" ");
   const after = words.slice(last + 1, last + 19).map((w) => w.word).join(" ");
   const sug = e.suggestion;
@@ -955,7 +958,7 @@ function renderDetail() {
       h("span", { class: "spacer" }),
       h("button", { onclick: () => playCut(e), title: "Pre-roll, skip the flub, post-roll (P or Enter)" }, "▶ Play with cut"),
       h("button", { onclick: () => playOriginal(e), title: "Pre-roll, the flub, post-roll (O or Shift+Enter)" }, "▶ Play original"),
-      e.type === "extra" ? h("button", { class: "ghost", onclick: () => toggleKind(e),
+      judged(e) ? h("button", { class: "ghost", onclick: () => toggleKind(e),
         title: "Is this a mistake, or talk that was meant (a chat, a joke)? Asides go in the Extended edition only. (A)" },
         isAside(e) ? "Mark as flub" : "Mark as aside") : null,
       h("button", { class: "cut" + (e.decision === "cut" ? " on" : ""), onclick: () => decide(e, "cut") },
@@ -979,7 +982,7 @@ function renderDetail() {
       h("div", { class: "keys" },
         h("span", {}, h("kbd", {}, "P"), " play with cut"), h("span", {}, h("kbd", {}, "O"), " original"),
         h("span", {}, h("kbd", {}, "X"), " cut"), h("span", {}, h("kbd", {}, "K"), " keep"),
-        e.type === "extra" ? h("span", {}, h("kbd", {}, "A"), " aside / flub") : null,
+        judged(e) ? h("span", {}, h("kbd", {}, "A"), " aside / flub") : null,
         h("span", {}, h("kbd", {}, "←"), h("kbd", {}, "→"), " prev/next"), h("span", {}, h("kbd", {}, "Space"), " play/pause"),
         h("span", {}, h("kbd", {}, "⌫"), " undo decision"),
         h("span", {}, h("kbd", {}, "G"), " glitch in cleaned audio"), h("span", {}, h("kbd", {}, "N"), " next cut"))));

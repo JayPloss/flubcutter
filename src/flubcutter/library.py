@@ -22,7 +22,11 @@ from flubcutter.check import check_joins
 
 AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".webm", ".caf", ".aiff", ".aif", ".mp4"}
 BROWSER_EXTS = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".webm", ".mp4"}
-CANDIDATES = ("restart", "filler", "extra")
+CANDIDATES = ("restart", "filler", "extra", "noise")
+JUDGED = ("extra", "noise")  # candidates the AI judge decides
+# A pause between two read words with this much sound in it, but no words
+# (a yawn, a cough, a laugh, a chair), is a candidate of its own: "noise".
+NOISE_MIN = 0.8
 # Below this the AI's call is a guess, so the edit waits for a person;
 # above it the suggestion is accepted unless someone says otherwise.
 SURE = 0.8
@@ -349,7 +353,7 @@ class Library:
         None for extra speech nobody has judged yet, and for non-candidates."""
         if event["type"] in ("restart", "filler"):
             return "flub"
-        if event["type"] != "extra":
+        if event["type"] not in JUDGED:
             return None
         return review.get("kinds", {}).get(event["id"]) or review["ai"].get(event["id"], {}).get("kind")
 
@@ -370,6 +374,8 @@ class Library:
             return {"decision": "keep", "by": "rule", "reason": "An aside: in the Extended edition."}
         if kind == "flub":
             return {"decision": "cut", "by": "rule", "reason": "Marked as a flub."}
+        if event["type"] == "noise":
+            return {"decision": "cut", "by": "rule", "reason": "Sound with no words: a yawn, a cough, a noise."}
         return {"decision": "keep", "by": "default", "reason": "Not judged yet; kept to be safe."}
 
     @classmethod
@@ -407,7 +413,7 @@ class Library:
         a = self.alignment(book_id, ch["id"])
         review = self.review(book_id, ch["id"])
         cands = [e for e in a["events"] if e["type"] in CANDIDATES] if a else []
-        extras = [e for e in cands if e["type"] == "extra"]
+        extras = [e for e in cands if e["type"] in JUDGED]
         reviewed = sum(e["id"] in review["decisions"] for e in cands)
         waiting = sum(self.needs_you(e, review) for e in cands)
         judged = sum(e["id"] in review["ai"] or e["id"] in review["decisions"] for e in extras)
@@ -473,8 +479,31 @@ class Library:
         words = self.chapter_words(book_id, ch)
         result = align.analyze(words, self.chapter_text(book_id, chapter_id))
         result["parts"] = [p["id"] for p in ch["parts"]]
+        self.find_noises(book_id, ch, result)
         align.save(result, self.work_dir(book_id, chapter_id) / "alignment.json")
         return result
+
+    def find_noises(self, book_id: str, ch: dict, a: dict) -> None:
+        """Turn each long pause that isn't quiet into a "noise" candidate.
+
+        Silence is judged on the original recording, as for the cuts. The
+        edges of the pause are left out: they belong to the words' sounds."""
+        acs = {}
+        for e in a["events"]:
+            if e["type"] != "gap" or "between" not in e:
+                continue
+            p = e["part"]
+            if p not in acs:
+                acs[p] = edit.Acoustics(edit.load(self.part_audio(book_id, ch["parts"][p])))
+            ac = acs[p]
+            lo, hi = ac.k(e["start"] + 0.15), ac.k(e["end"] - 0.15)
+            if hi <= lo:
+                continue
+            sound = float((ac.db[lo:hi] > ac.floor + edit.QUIET_DB).sum()) * edit.HOP
+            if sound >= NOISE_MIN:
+                e.update(type="noise", sound=round(sound, 2), words=[], text="(sound, no words)",
+                         id=f"noise-{p}-{e['start']:.2f}-{e['book_index']}")
+        a["noise_checked"] = True
 
     def run_render(self, book_id: str, chapter_id: str, check: str | set | None = "all",
                    progress=None) -> Path:
@@ -513,18 +542,25 @@ class Library:
             for n, edition in enumerate(EDITIONS):
                 span = lambda f, step, n=n: progress((0.05 + 0.95 * (n + f) / len(EDITIONS)),
                                                      f"{step} ({edition})") if progress else None
-                keep = edit.keep_set(a, self.edition_decisions(a, review, edition))
+                decisions = self.edition_decisions(a, review, edition)
+                keep = edit.keep_set(a, decisions)
+                # Sound with no words: cut, the pause is rebuilt; kept, it
+                # stays exactly as recorded.
+                noises = [e for e in a["events"] if e["type"] == "noise"]
+                cut_after = {e["between"][0] for e in noises if decisions.get(e["id"]) == "cut"}
                 # An aside is kept as it was recorded, and set off from the
                 # reading like a paragraph.
-                asides = [e for e in a["events"] if self.kind(e, review) == "aside" and set(e["words"]) <= keep]
+                asides = [e for e in a["events"] if self.kind(e, review) == "aside" and e["words"]
+                          and set(e["words"]) <= keep]
                 intact = {i for e in asides for i in e["words"][:-1]}
+                intact |= {e["between"][0] for e in noises if decisions.get(e["id"]) != "cut"}
                 marks = dict(breaks)
                 for e in asides:
                     marks[e["words"][0] - 1] = marks[e["words"][-1]] = "¶"
                 out = self.output_path(book_id, chapter_id, edition)
                 render_file = self.render_file(book_id, chapter_id, edition)
-                same = next((e for e, k in kept.items() if k == keep), None)
-                kept[edition] = keep
+                same = next((e for e, k in kept.items() if k == (keep, cut_after, intact)), None)
+                kept[edition] = (keep, cut_after, intact)
                 if same:  # no asides kept: the editions are one and the same
                     out.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(self.output_path(book_id, chapter_id, same), out)
@@ -533,7 +569,7 @@ class Library:
                 only = None if check == "all" else set(check or ())
                 for attempt in range(edit.MAX_LEVEL + 1):
                     span(0.4 * attempt / (edit.MAX_LEVEL + 1), "rendering")
-                    samples, report = edit.render(audios, words, keep, levels(), marks, originals, intact)
+                    samples, report = edit.render(audios, words, keep, levels(), marks, originals, intact, cut_after)
                     samples = enhance.loudness(samples)
                     out.parent.mkdir(parents=True, exist_ok=True)
                     edit.write_wav(samples, out)

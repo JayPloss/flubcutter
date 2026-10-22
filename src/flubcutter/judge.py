@@ -1,5 +1,6 @@
 """Step 2b: an AI judge for "extra" speech, i.e. words in the recording that
-are not in the book and are not an earlier take of a re-read passage.
+are not in the book and are not an earlier take of a re-read passage, and
+for "noise", sound with no words in a pause of the reading.
 
 Each one is one of two kinds of audio, and Claude decides which, given the
 surrounding book text and transcript:
@@ -48,6 +49,22 @@ VERDICT is "cut" or "keep":
 Plain edition leaves all asides out anyway), unless it is empty and nobody \
 would want to hear it again.
 
+Some items were transcribed in place of a book word ("in_place_of_book_word"): \
+an "oh" or a "yeah" where the book has "out" or "to". Usually that is a \
+yawn, a sigh or a stray sound (and the book word was swallowed): a flub. If \
+it may simply be the book word misheard by the transcriber (a cut would lose \
+part of the reading), the verdict is "keep".
+
+Some items have no words at all ("extra_speech" is "(sound, no words)"): a \
+pause between two read words with that many seconds of sound in it that the \
+transcriber heard no words in. Judge them from where they fall:
+- in the middle of the reading (the words either side are the book's, read \
+straight on, no talk nearby): a yawn, cough, sigh, sniff, bump or rustle. \
+That is a flub: "cut".
+- inside or right beside a conversation or a reaction (talk not in the book \
+just before or after it, a joke, a question): laughter, a child's quiet \
+answer, a reaction. That is an aside: "keep".
+
 When unsure of the kind, choose "aside" for anything that sounds deliberate \
 and "flub" for anything short and mechanical. Give a short reason."""
 
@@ -81,13 +98,15 @@ def _items(events: list[dict], words: list[dict], book_text: str) -> list[dict]:
     items = []
     for e in events:
         before_book, after_book = book_context(book_text, e["book_index"], 30, 30)
-        first, last = e["words"][0], e["words"][-1]
+        # A noise has no words of its own: its context is either side of the pause.
+        first, last = (e["between"][1], e["between"][0]) if e["type"] == "noise" else (e["words"][0], e["words"][-1])
         said_before = " ".join(w["word"] for w in words[max(0, first - 20):first])
         said_after = " ".join(w["word"] for w in words[last + 1:last + 21])
         items.append({
             "id": e["id"],
             "extra_speech": e["text"],
-            "seconds": round(e["end"] - e["start"], 1),
+            "seconds": round(e.get("sound", e["end"] - e["start"]), 1),
+            **({"in_place_of_book_word": e["stands_for"]} if e.get("stands_for") else {}),
             "book_text_before": before_book,
             "book_text_after": after_book,
             "recording_before": said_before,
