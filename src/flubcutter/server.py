@@ -9,7 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from flubcutter import __version__, importers, judge
 from flubcutter.align import book_context
-from flubcutter.jobs import RENDERABLE, Jobs
+from flubcutter.jobs import RENDERABLE, Jobs, apart
 from flubcutter.library import AUDIO_EXTS, CANDIDATES, EDITIONS, Library
 
 STATIC = Path(__file__).parent / "static"
@@ -310,8 +310,9 @@ def create_app(lib: Library) -> FastAPI:
     def glitch(b: str, c: str, body: dict = Body(...)):
         chapter_or_404(b, c)
         try:
-            r = lib.report_glitch(b, c, float(body["time"]),
-                                  edition=edition_or_404(body.get("edition", "extended")))
+            # Rebuilding the spot loads audio and a speech model: in a process of its own.
+            r = apart(lib, "report_glitch", b, c, float(body["time"]),
+                      edition=edition_or_404(body.get("edition", "extended")))
         except RuntimeError as e:
             raise HTTPException(409, str(e))
         r["render"].pop("chunks", None)

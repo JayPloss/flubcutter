@@ -9,10 +9,12 @@
         output/extended/<chapter-id>.wav  ... with the asides that were kept
 """
 
+import fcntl
 import json
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -37,8 +39,37 @@ SURE = 0.8
 EDITIONS = ("extended", "plain")
 KINDS = ("flub", "aside")
 
-_lock = threading.RLock()
-_render_lock = threading.Lock()
+
+
+class _SharedLock:
+    """A re-entrant lock that also holds between processes: jobs run in a
+    worker process of their own (see jobs), next to the app's edits."""
+
+    def __init__(self, name: str):
+        self._path = Path(tempfile.gettempdir()) / f"flubcutter-{os.getuid()}-{name}.lock"
+        self._thread = threading.RLock()
+        self._depth = 0
+        self._fd = None
+
+    def __enter__(self):
+        self._thread.acquire()
+        if self._depth == 0:
+            self._fd = os.open(self._path, os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(self._fd, fcntl.LOCK_EX)
+        self._depth += 1
+        return self
+
+    def __exit__(self, *exc):
+        self._depth -= 1
+        if self._depth == 0:
+            fcntl.flock(self._fd, fcntl.LOCK_UN)
+            os.close(self._fd)
+            self._fd = None
+        self._thread.release()
+
+
+_lock = _SharedLock("library")
+_render_lock = _SharedLock("render")
 GLITCH_WINDOW = 3.0  # seconds before the press that a glitch report covers
 
 
