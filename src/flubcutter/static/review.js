@@ -277,7 +277,15 @@ function verdictOf(j) {
   const v = S.data.render?.verdicts?.[j.key];
   return v && v.level === (j.level || 0) ? v.verdict : null;
 }
-const toHear = () => (shown()?.joins || []).filter((j) => verdictOf(j) !== "good").sort((a, b) => a.start - b.start);
+// Worth an ear: a cut with no silence to hide in, or one you called bad
+// before it was rebuilt. A pause shortened inside one take, or a cut made in
+// a silence, has never sounded wrong to you, so those are left out (they are
+// still in "Listen to all the cuts again").
+function risky(j) {
+  const v = S.data.render?.verdicts?.[j.key];
+  return (j.kind !== "pause" && j.tight) || (v && v.verdict === "bad");
+}
+const toHear = () => (shown()?.joins || []).filter((j) => risky(j) && verdictOf(j) !== "good").sort((a, b) => a.start - b.start);
 
 function stretches(joins, dur) {
   const out = [];
@@ -298,8 +306,8 @@ function passIntro() {
   const all = shown()?.joins || [], n = toHear().length;
   const secs = stretches(toHear(), Infinity).reduce((a, s) => a + s.end - s.start, 0);
   if (!all.length) return "No cuts in this chapter.";
-  return n ? `${n} of ${all.length} cuts to hear, about ${Math.max(1, Math.round(secs / 60))} min. Press B if one sounds wrong.`
-    : `All ${all.length} cuts marked good. Nothing left to hear.`;
+  return n ? `${n} of ${all.length} cuts to hear, about ${Math.max(1, Math.round(secs / 60))} min; the rest are pauses and cuts in a silence. Press B if one sounds wrong.`
+    : `Nothing left to hear among the ${all.length} cuts.`;
 }
 
 async function startPass() {
