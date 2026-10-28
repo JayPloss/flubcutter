@@ -33,6 +33,7 @@ export function teardownReview() {
   S.audio?.pause();
   S.ows?.destroy();
   S.oaudio?.pause();
+  S.hear?.pause();
   S = null;
 }
 
@@ -102,7 +103,7 @@ function build() {
       h("h1", {}, data.chapter.title),
       h("div", { class: "row small muted", style: "margin-top:4px" },
         data.coverage !== null ? h("span", {}, `${Math.round(data.coverage * 100)}% of book text matched`) : null,
-        S.notes.length ? h("span", {}, `${S.notes.length} word-level differences`) : null)),
+        null)),
     h("span", { class: "spacer" }),
     h("div", { id: "progress" }),
     MACHINE.includes(st.stage) && !st.busy
@@ -166,22 +167,71 @@ function build() {
     h("div", { style: "padding:12px 14px" },
       h("button", { onclick: acceptAll, title: "Take the suggested decision for every flub you haven't decided" }, "Accept all suggestions")));
 
-  // The listen-through comes first; the recording, transcript and edit
-  // list are only needed when something needs you, so they fold away.
-  const need = S.cands.filter(waiting).length;
-  const bench = h("details", { class: "bench", id: "bench", open: need > 0 || !data.render,
+  // The page is for tuning the automatic edit: listen to the cuts, settle
+  // the few calls the AI wasn't sure of. The recording, transcript and full
+  // edit list are a workbench you open yourself.
+  const bench = h("details", { class: "bench", id: "bench",
     ontoggle: () => { if (bench.open && !S.ws) showPart(S.part); } },
-    h("summary", {}, h("b", {}, "Edit decisions"), " ",
-      h("span", { class: "muted small" }, need ? `${need} need${need > 1 ? "" : "s"} you` : `${S.cands.length} edits, all settled · the recording, transcript and every edit`)),
+    h("summary", {}, h("b", {}, "Workbench"), " ",
+      h("span", { class: "muted small" }, `the recording, transcript and all ${S.cands.length} edits`)),
     h("div", { class: "review" }, left, right));
-  S.view.replaceChildren(h("div", { class: "stack" }, header, renderPanel(), bench));
+  S.view.replaceChildren(h("div", { class: "stack" }, header, h("div", { id: "decide" }), renderPanel(), bench));
 
   S.onKey = onKey;
   document.addEventListener("keydown", S.onKey);
   renderProgress();
+  renderDecide();
   renderList();
   renderDetail();
-  if (bench.open) showPart(S.part);
+}
+
+// The calls the AI wasn't sure of: hear the spot, keep or cut. What was said
+// isn't shown; the transcript of unscripted talk is too rough to judge by.
+function renderDecide() {
+  const el = document.getElementById("decide");
+  if (!el) return;
+  const todo = S.cands.filter(waiting);
+  if (!todo.length) return el.replaceChildren();
+  const word = (e, d) => (isAside(e) ? (d === "cut" ? "Leave out" : "Keep in Extended") : d === "cut" ? "Cut" : "Keep");
+  el.replaceChildren(h("section", { class: "panel" },
+    h("div", { class: "panel-head" }, h("h2", {}, `${todo.length} call${todo.length > 1 ? "s" : ""} for you`),
+      h("span", { class: "small muted" }, "The AI wasn't sure about these. Everything else is decided.")),
+    ...todo.map((e) => h("div", { class: "listen" },
+      h("button", { class: "ghost", "data-hear": e.id, onclick: () => hear(e) }, "▶ Hear it"),
+      h("span", { class: "mono small" }, `${S.data.parts.length > 1 ? `P${e.part + 1} ` : ""}${fmtTime(e.start)} · ${fmtTime(e.end - e.start)} long`),
+      h("span", { class: "tag " + (isAside(e) ? "aside" : "type") }, typeLabel(e)),
+      h("span", { class: "small", style: "flex:1 1 320px" }, e.suggestion.reason),
+      ...["keep", "cut"].map((d) => h("button", { class: e.suggestion.decision === d ? "primary" : "",
+        onclick: () => settle(e, d) }, word(e, d)))))));
+}
+
+// Play a spot in the raw recording, from 2 s before it; again to stop.
+function hear(e) {
+  const playing = S.hear && !S.hear.paused && S.hearing === e.id;
+  S.hear?.pause();
+  document.querySelectorAll("[data-hear]").forEach((b) => (b.textContent = "▶ Hear it"));
+  if (playing) return;
+  S.pass && stopPass();
+  S.ows?.pause(); S.player?.stop(); S.ws?.pause();
+  const part = S.data.parts[e.part];
+  S.hear = new Audio(`/api/books/${S.bookId}/chapters/${S.chapterId}/parts/${part.id}/audio`);
+  S.hearing = e.id;
+  S.hear.addEventListener("loadedmetadata", () => { S.hear.currentTime = Math.max(0, e.start - 2); S.hear.play(); }, { once: true });
+  S.hear.addEventListener("timeupdate", () => { if (S?.hear?.currentTime > e.end + 2) S.hear.pause(); });
+  S.hear.addEventListener("pause", () => { const b = document.querySelector(`[data-hear="${CSS.escape(e.id)}"]`); if (b) b.textContent = "▶ Hear it"; });
+  const b = document.querySelector(`[data-hear="${CSS.escape(e.id)}"]`);
+  if (b) b.textContent = "■ Stop";
+}
+
+async function settle(e, decision) {
+  if (S.hearing === e.id) S.hear?.pause();
+  await guard(async () => {
+    const resp = await api(`/api/books/${S.bookId}/chapters/${S.chapterId}/decisions`, { method: "PUT", json: { [e.id]: decision } });
+    e.decision = decision;
+    afterChange(resp);
+    renderDecide();
+    renderList();
+  });
 }
 
 function renderPanel(playOpts = {}) {
@@ -195,8 +245,6 @@ function renderPanel(playOpts = {}) {
   const out = `/api/books/${S.bookId}/chapters/${S.chapterId}/output?edition=${S.edition}`;
   const joins = r?.joins || [];
   const asides = full?.asides?.length || 0;
-  const tight = joins.filter((j) => j.tight).length;
-  const rebuilt = joins.filter((j) => j.level > 0).length;
   const panel = h("section", { class: "panel", id: "renderpanel" },
     h("div", { class: "panel-head" },
       h("h2", {}, "Cleaned chapter"),
@@ -207,9 +255,6 @@ function renderPanel(playOpts = {}) {
       full?.plain && S.edition === "extended" ? h("span", { class: "small muted" },
         asides ? `${asides} aside${asides > 1 ? "s" : ""} kept` : "no asides kept") : null,
       r ? h("span", { class: "small muted" }, `${fmtTime(r.input_seconds)} → ${fmtTime(r.output_seconds)} (${fmtTime(r.input_seconds - r.output_seconds)} removed)`) : null,
-      joins.length ? h("span", { class: "small muted", title: "Tight cuts had no silence to cut in. Rebuilt joins were fixed after a glitch report or a failed listen-back check." },
-        `${joins.length} cuts · ${tight} tight · ${rebuilt} rebuilt`) : null,
-      r?.rhythm ? paceBadge(r) : null,
       h("span", { class: "spacer" }),
       r ? h("a", { class: "btn", href: out, download: true }, `Download ${full?.plain ? EDITION_LABEL[S.edition] + " " : ""}WAV`) : null,
       data.status.job?.kind === "render" ? statusTag(data.status, { book: S.bookId, chapter: S.chapterId })
@@ -224,13 +269,16 @@ function renderPanel(playOpts = {}) {
     return panel;
   }
   panel.append(
-    h("div", { class: "wavebox" }, h("div", { id: "outwave" }),
-      h("div", { id: "outticks", class: "ticks", title: "Every cut in the cleaned chapter. Click one to hear it." })),
     h("div", { class: "listen" },
       h("button", { id: "passbtn", class: "primary big", onclick: () => (S.pass ? stopPass() : startPass()) }, passLabel()),
       h("div", { id: "passinfo", class: "small" }, passIntro()),
       h("span", { class: "spacer" }),
-      h("span", { class: "keys small muted" }, h("kbd", {}, "B"), " bad (no answer means good) ", h("kbd", {}, "← →"), " previous / next cut ", h("kbd", {}, "Space"), " pause ", h("kbd", {}, "Esc"), " stop")),
+      h("span", { class: "keys small muted" }, h("kbd", {}, "B"), " bad (no answer means good) ", h("kbd", {}, "← →"), " previous / next cut ", h("kbd", {}, "Space"), " pause ", h("kbd", {}, "Esc"), " stop")));
+  const whole = h("details", { class: "tips", open: pref("whole", false),
+    ontoggle: () => { setPref("whole", whole.open); if (whole.open && !S.ows) showOutput(playOpts); } },
+    h("summary", { class: "small" }, h("b", {}, "Whole chapter"), h("span", { class: "muted" }, " · the waveform with every cut, to play straight through")),
+    h("div", { class: "wavebox" }, h("div", { id: "outwave" }),
+      h("div", { id: "outticks", class: "ticks", title: "Every cut in the cleaned chapter. Click one to hear it." })),
     h("div", { class: "transport" },
       h("button", { id: "outplay", class: "ghost", onclick: toggleOut }, "▶ Play whole chapter"),
       h("button", { class: "ghost", title: "Back 5 seconds", onclick: () => outSeek(-5) }, "↺ 5s"),
@@ -238,19 +286,20 @@ function renderPanel(playOpts = {}) {
       h("span", { id: "outtime", class: "time mono small" }, "0:00.0"),
       h("span", { class: "spacer" }),
       h("span", { class: "small muted" }, "Playing the whole chapter, B marks the cut you just heard.")));
+  panel.append(whole);
   const tips = recordingTips(joins);
   if (tips.length) panel.append(h("details", { class: "tips" },
-    h("summary", { class: "small" }, h("b", {}, `Recording tips (${tips.length})`), h("span", { class: "muted" }, " · what in the raw recording made a cut hard")),
+    h("summary", { class: "small" }, h("b", {}, `Re-record or accept (${tips.length})`), h("span", { class: "muted" }, " · cuts that still sound wrong after the most careful rebuild")),
     h("ul", { class: "small" }, tips.map((t) => h("li", {},
-      h("a", { href: "#", onclick: (ev) => { ev.preventDefault(); S.pass ? passJump(t.join) : playFrom(t.join.start - 2.5); } }, fmtTime(t.join.start)),
+      h("a", { href: "#", onclick: async (ev) => { ev.preventDefault(); if (!S.pass) await startPass(); passJump(t.join); } }, fmtTime(t.join.start)),
       ` “${t.join.words.join(" | ")}”: ${t.text}`,
       t.accept ? h("button", { class: "small ghost", style: "margin-left:8px", onclick: () => rateCut("good", t.join) }, "Accept as is") : null)))));
-  setTimeout(() => showOutput(playOpts), 0);
+  if (whole.open || playOpts.play || playOpts.seek != null) { whole.open = true; setTimeout(() => showOutput(playOpts), 0); }
   return panel;
 }
 
-// What the raw recording could do better, from the cuts that were hard to
-// make. Some spots can only be re-recorded, or accepted.
+// Cuts that still sound wrong after the most careful rebuild: re-record or
+// accept.
 const MAX_LEVEL = 2;
 function recordingTips(joins) {
   const out = [];
@@ -259,8 +308,6 @@ function recordingTips(joins) {
     if (v === "bad" && (j.level || 0) >= MAX_LEVEL) {
       out.push({ join: j, accept: true,
         text: `still sounds wrong after the most careful rebuild. Re-record from “${j.before.join(" ")}”, or accept it.` });
-    } else if (j.tight && v !== "good") {
-      out.push({ join: j, text: `you went straight from “${j.words[0]}” into the next take with no pause, so the cut had no silence to go in. When you restart, stop for a beat first.` });
     }
   }
   return out;
@@ -450,18 +497,6 @@ function setEdition(ed) {
 function shown() {
   const r = S.data.render;
   return r && S.edition === "plain" && r.plain ? { ...r, ...r.plain } : r;
-}
-
-function paceBadge(r) {
-  const rh = r.rhythm, n = (r.pacing || []).length;
-  const tip = `Your pacing, measured from this recording: about `
-    + (rh["¶"] ? `${rh["¶"].typ.toFixed(2)} s at the end of a paragraph, ` : "")
-    + `${rh["."].typ.toFixed(2)} s after a full stop, `
-    + (rh["("] ? `${rh["("].typ.toFixed(2)} s going into or out of an aside, ` : "")
-    + `${rh[","].typ.toFixed(2)} s after a comma, ${rh.word.typ.toFixed(2)} s between other words. `
-    + `Every pause in the cleaned audio is checked against that range.`;
-  return h("span", { class: `tag ${n ? "pending" : "keep"}`, title: tip },
-    n ? `${n} pause${n > 1 ? "s" : ""} longer than you read` : "pacing ✓");
 }
 
 // ---------- cleaned-chapter player ----------
