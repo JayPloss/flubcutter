@@ -20,11 +20,20 @@ def heard_ok(heard: list[str], before: list[str], after: list[str]) -> bool:
     one after it, both intact and with nothing in between? (Words further
     from the join are left out: the recogniser hears those a little
     differently from time to time, which says nothing about the cut.)"""
-    want = [canon(w) for w in before[-1:] + after[:1]]
-    heard = [canon(w) for w in heard]
+    tidy = lambda w: canon("".join(normalize(w)))
+    want = [tidy(w) for w in before[-1:] + after[:1]]
+    heard = [tidy(w) for w in heard]
     n = len(want)
-    if any(heard[i:i + n] == want for i in range(len(heard) - n + 1)):
-        return True
+    for i in range(len(heard) - n + 1):
+        if heard[i:i + n] == want:
+            # The start of the take that was cut away, heard again: "told
+            # Kreacher to to go" for "told Kreacher | to go". (Unless the
+            # reading itself says it twice.)
+            again_after = i + n < len(heard) and heard[i + n] == want[-1] \
+                and [tidy(w) for w in after[1:2]] != want[-1:]
+            again_before = i > 0 and heard[i - 1] == want[0] \
+                and [tidy(w) for w in before[-2:-1]] != want[:1]
+            return not (again_after or again_before)
     # A compound split at the join can come back closed up: "rabbit" "hole"
     # heard as "rabbithole".
     return any(h == "".join(want) for h in heard)

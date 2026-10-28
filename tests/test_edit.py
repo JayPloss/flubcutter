@@ -238,6 +238,11 @@ def test_heard_ok():
     assert check.heard_ok("pictures are conversations so she".split(), ["or", "conversations"], ["so", "she"])
     assert check.heard_ok("it was labeled orange".split(), ["was", "labelled"], ["orange"])
     assert check.heard_ok("a large rabbithole under".split(), ["rabbit"], ["hole", "under"])
+    # The cut-away take's first word leaks through.
+    assert not check.heard_ok("he told Creature to to go home".split(), ["told", "Creature"], ["to", "go"])
+    assert not check.heard_ok("the the white rabbit".split(), ["the", "the"][:1], ["white"])
+    # ...unless the book says it twice.
+    assert check.heard_ok("I I think".split(), ["I"], ["I", "think"])
 
 
 def test_room_tone_leaves_out_the_soft_start_of_a_word():

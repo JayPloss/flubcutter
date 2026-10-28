@@ -66,16 +66,17 @@ def to_source(chunks: list[dict], t: float) -> tuple[int, float] | None:
     return None
 
 
-def source_words(heard: list[dict], spot: dict, chunks: list[dict],
-                 words: list[dict]) -> tuple[int, float, list[int]] | None:
+def source_words(heard: list[dict], spot: dict, chunks: list[dict], words: list[dict],
+                 across: bool = False) -> tuple[int, float, list[int]] | None:
     """Where a spot is in the recording: (part, offset from cleaned-audio
-    time, indices of the chapter words there), or None if it crosses a cut."""
+    time, indices of the chapter words there), or None if it crosses a cut
+    (unless `across`: then the words from its start to its end)."""
     h = heard[spot["first"]:spot["last"] + 1]
     a, b = to_source(chunks, h[0]["start"]), to_source(chunks, h[-1]["end"])
-    if not a or not b or a[0] != b[0]:
+    if not a or not b or a[0] != b[0] or b[1] < a[1]:
         return None
     part, off = a[0], a[1] - h[0]["start"]
-    if abs((b[1] - h[-1]["end"]) - off) > 0.01:
+    if abs((b[1] - h[-1]["end"]) - off) > 0.01 and not across:
         return None  # a cut in between
     mid = lambda w: (w["start"] + w["end"]) / 2
     idx = [i for i, w in enumerate(words) if w["part"] == part and a[1] - 0.05 <= mid(w) <= b[1] + 0.05]

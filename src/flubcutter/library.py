@@ -665,7 +665,7 @@ class Library:
             # A first try the AI kept as the book word, heard as a repeat: cut.
             flips = {}
             for sp in spots:
-                where = relisten.source_words(heard, sp, info["chunks"], words)
+                where = relisten.source_words(heard, sp, info["chunks"], words, across=True)
                 if not where:
                     continue
                 for e in a["events"]:
