@@ -150,6 +150,43 @@ def _dp_align(book: list[int], spoken: list[int]) -> list[tuple[str, int | None,
     return ops
 
 
+def sound(word: str) -> str:
+    """A rough key for how a word sounds: "creature" and "Kreacher" are both
+    "KR..". Consonants only after the first letter, similar ones folded
+    together, doubles closed up."""
+    w = re.sub(r"[^a-z]", "", word)
+    if not w:
+        return ""
+    for a, b in (("ch", "x"), ("sh", "x"), ("ph", "f"), ("th", "t"), ("ck", "k"), ("q", "k"),
+                 ("c", "k"), ("z", "s"), ("v", "f"), ("d", "t"), ("b", "p"), ("g", "k")):
+        w = w.replace(a, b)
+    w = w[0] + re.sub(r"[aeiouyhw]", "", w[1:])
+    return re.sub(r"(.)\1+", r"\1", w).upper()
+
+
+def _sounds_like(a: str, b: str) -> bool:
+    return len(a) >= 4 and len(b) >= 4 and sound(a)[:2] == sound(b)[:2] and len(sound(a)) >= 2
+
+
+def _sound_alike_swaps(ops: list[tuple[str, int | None, int | None]], book: list[str],
+                       spoken: list[str]) -> list[tuple[str, int | None, int | None]]:
+    """A misheard word right before a stutter: book "told Kreacher to go",
+    spoken "told creature to to go". Both pairings cost the same, and the
+    traceback pairs "Kreacher" with the first "to" and leaves "creature"
+    over, so the stutter stays in. Where an extra word sounds like the book
+    word its neighbour stands in for, the neighbour doesn't, and the
+    neighbour is said again straight after, the two swap: the misheard word
+    reads the book word and the stutter is extra. (Without the repeat, the
+    two are more likely one word the transcriber split: "Herman only" for
+    "Hermione".)"""
+    for k in range(len(ops) - 1):
+        (k1, b1, s1), (k2, b2, s2) = ops[k], ops[k + 1]
+        if k1 == EXTRA and k2 == SUB and s2 == s1 + 1 and spoken[s2] == spoken[min(s2 + 1, len(spoken) - 1)] \
+                and s2 + 1 < len(spoken) and _sounds_like(spoken[s1], book[b2]) and not _sounds_like(spoken[s2], book[b2]):
+            ops[k], ops[k + 1] = (SUB, b2, s1), (EXTRA, None, s2)
+    return ops
+
+
 def _anchors(book: list[int], spoken: list[int]) -> list[tuple[int, int]]:
     """Split points: n-grams that occur exactly once in both texts.
 
@@ -234,14 +271,14 @@ def align_words(book: list[str], spoken: list[str]) -> list[tuple[str, int | Non
     b = [vocab.setdefault(canon(w), len(vocab)) for w in book]
     s = [vocab.setdefault(canon(w), len(vocab)) for w in spoken]
     if (len(b) + 1) * (len(s) + 1) <= MAX_CELLS:
-        return _rescue_strays(_dp_align(b, s), s)
+        return _sound_alike_swaps(_rescue_strays(_dp_align(b, s), s), book, spoken)
 
     ops = []
     bounds = [(0, 0)] + _anchors(b, s) + [(len(b), len(s))]
     for (i0, j0), (i1, j1) in zip(bounds, bounds[1:]):
         for kind, bi, sj in _dp_align(b[i0:i1], s[j0:j1]):
             ops.append((kind, None if bi is None else bi + i0, None if sj is None else sj + j0))
-    return _rescue_strays(ops, s)
+    return _sound_alike_swaps(_rescue_strays(ops, s), book, spoken)
 
 
 def _overlap(extra: list[str], text: list[str]) -> float:

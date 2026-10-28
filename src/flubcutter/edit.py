@@ -610,7 +610,7 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
         start_out = len(out) - (min(fade_in, len(out), len(piece)) if len(out) else 0)
         out = _xfade(out, piece, fade_in) if len(out) else piece.copy()
         run_pos.append(start_out / RATE - s)  # output time = source time + offset
-        chunks.append({"part": p, "start": round(s, 3), "end": round(e, 3)})
+        chunks.append({"part": p, "start": round(s, 3), "end": round(e, 3), "at": round(start_out / RATE, 3)})
         if r < len(rs) - 1:
             hard_out = A_out["hard"]
             fo = int(LEVELS[lvl[r]]["hard_fade"] * RATE) if hard_out else xf

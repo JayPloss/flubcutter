@@ -55,6 +55,11 @@ yawn, a sigh or a stray sound (and the book word was swallowed): a flub. If \
 it may simply be the book word misheard by the transcriber (a cut would lose \
 part of the reading), the verdict is "keep".
 
+An item followed in the recording by the book words it sounds like, read \
+properly ("Mondio of" then "moaned the elf", "Creature" then "Kreacher \
+said"), is a false start on those words: a flub, "cut". The words are \
+in the reading right after it, so cutting the first try loses nothing.
+
 Some items have no words at all ("extra_speech" is "(sound, no words)"): a \
 pause between two read words with that many seconds of sound in it that the \
 transcriber heard no words in. Judge them from where they fall:

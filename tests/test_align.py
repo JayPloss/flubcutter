@@ -92,3 +92,12 @@ def test_a_yawn_transcribed_as_yeah_in_place_of_book_words_is_extra():
     assert [e["text"] for e in r["events"] if e["type"] == "extra"] == ["Yeah.", "Yeah."]
     assert 2 not in r["kept_words"] and 3 not in r["kept_words"]
     assert not [e for e in r["events"] if e["type"] == "sub"]
+
+
+def test_a_stutter_beside_a_misheard_name_is_cut():
+    # "Kreacher" heard as "creature", then "to" said twice.
+    book = "and he told Kreacher to go home and never"
+    spoken = "and he told creature to to go home and never".split()
+    r = analyze(words_from(spoken), book)
+    assert 3 in r["kept_words"]
+    assert events_of(r, "restart", "extra") == [("restart", "to")]

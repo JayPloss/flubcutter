@@ -163,9 +163,24 @@ def run(lib: Library, job: dict, progress) -> None:
     elif job["kind"] == "judge":
         _judge(lib, b, c, progress)
     elif job["kind"] == "render":
-        lib.run_render(b, c, progress=progress)
+        _render(lib, b, c, progress)
     elif job["kind"] == "process":
         _process(lib, b, c, progress)
+
+
+def _render(lib, b, c, progress):
+    """Render, listen to the result for repeats the transcript missed, and if
+    any were found, judge what's new and render again."""
+    from flubcutter import judge
+
+    lib.run_render(b, c, progress=lambda f, s=None: progress(0.55 * f, s))
+    fixed = lib.relisten(b, c, progress=lambda f: progress(0.55 + 0.15 * f, "listening for repeats"))
+    if not fixed:
+        progress(1.0, "done")
+        return
+    if judge.available():
+        _judge(lib, b, c, lambda f: progress(0.7 + 0.05 * f, "AI judging"))
+    lib.run_render(b, c, progress=lambda f, s=None: progress(0.75 + 0.25 * f, s))
 
 
 def _judge(lib, b, c, progress):

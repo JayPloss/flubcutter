@@ -4,7 +4,7 @@
         book.json                   title, chapter order, parts per chapter
         text/<chapter-id>.txt       the chapter's book text
         audio/                      raw recordings (any format ffmpeg reads)
-        work/<chapter-id>/          transcripts, alignment, review, peaks
+        work/<chapter-id>/          transcripts, alignment, review, peaks, relisten
         output/plain/<chapter-id>.wav     the cleaned chapter: just the story
         output/extended/<chapter-id>.wav  ... with the asides that were kept
 """
@@ -19,7 +19,7 @@ import threading
 import time
 from pathlib import Path
 
-from flubcutter import align, edit, enhance, judge
+from flubcutter import align, edit, enhance, judge, relisten
 from flubcutter.check import check_joins
 
 AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".webm", ".caf", ".aiff", ".aif", ".mp4"}
@@ -641,6 +641,71 @@ class Library:
             _write_json(ext, {**_read_json(ext, {}),
                               "auto_levels": {k: v for k, v in auto.items() if k in keys}})
             return self.output_path(book_id, chapter_id)
+
+    def relisten(self, book_id: str, chapter_id: str, progress=None) -> int:
+        """Listen to the cleaned chapter for repeats (see relisten): write
+        stutters the transcript missed into it and align again, and cut first
+        tries the AI judge kept. Returns how many were fixed; what was heard
+        is kept in relisten.json."""
+        from flubcutter.transcribe import transcribe
+
+        out = self.output_path(book_id, chapter_id)
+        info = _read_json(self.render_file(book_id, chapter_id), {})
+        if not out.exists() or not any("at" in c for c in info.get("chunks", [])):
+            return 0
+        heard = transcribe(out, progress=progress)["words"]
+        spots = relisten.find_repeats(heard, self.chapter_text(book_id, chapter_id))
+        wd = self.work_dir(book_id, chapter_id)
+        with _lock:
+            ch = self.chapter(self.book(book_id), chapter_id)
+            words = self.chapter_words(book_id, ch)
+            a, review = self.alignment(book_id, chapter_id), self.review(book_id, chapter_id)
+            asides = {i for e in a["events"] if self.kind(e, review) == "aside" for i in e.get("words", [])}
+            fixes = relisten.patches(heard, spots, info["chunks"], words, asides)
+            # A first try the AI kept as the book word, heard as a repeat: cut.
+            flips = {}
+            for sp in spots:
+                where = relisten.source_words(heard, sp, info["chunks"], words)
+                if not where:
+                    continue
+                for e in a["events"]:
+                    v = review["ai"].get(e.get("id"))
+                    if v and v.get("verdict") == "keep" and self.kind(e, review) == "flub" \
+                            and e["id"] not in review["decisions"] and set(e.get("words", [])) & set(where[2]):
+                        heard_as = " ".join(w["word"] for w in heard[sp["first"]:sp["last"] + 1])
+                        flips[e["id"]] = dict(v, verdict="cut", confidence=1.0,
+                                              reason=f"Heard as a repeat in the cleaned audio: “{heard_as}”.")
+            if flips:
+                self.add_ai_verdicts(book_id, chapter_id, flips)
+            log = _read_json(wd / "relisten.json", {"rounds": []})
+            log["rounds"].append({"at": time.time(), "spots": [
+                {"time": heard[sp["first"]]["start"],
+                 "heard": " ".join(w["word"] for w in heard[max(0, sp["first"] - 4):sp["last"] + 4]),
+                 "repeat": " ".join(w["word"] for w in heard[sp["first"]:sp["last"] + 1])} for sp in spots],
+                "fixed": len(fixes), "cut": sorted(flips)})
+            _write_json(wd / "relisten.json", log)
+            if not fixes:
+                return len(flips)
+            transcripts = self.transcripts(book_id, ch)
+            base = [0]
+            for t in transcripts:
+                base.append(base[-1] + len((t or {}).get("words", [])))
+            st = self.joins_state(book_id, chapter_id)
+            ext = _read_json(self.render_file(book_id, chapter_id), {})
+            # Back to front, so each fix's word indices are still right.
+            for f in sorted(fixes, key=lambda f: -f["first"]):
+                local = f["first"] - base[f["part"]]
+                transcripts[f["part"]]["words"][local:local + f["count"]] = f["words"]
+                move = lambda d: {relisten.shift_key(k, f["first"], f["count"], len(f["words"])): v
+                                  for k, v in d.items()}
+                st["levels"], st["verdicts"] = move(st["levels"]), move(st["verdicts"])
+                ext["auto_levels"] = move(ext.get("auto_levels", {}))
+            for p, t in zip(ch["parts"], transcripts):
+                _write_json(self.transcript_path(book_id, chapter_id, p["id"]), t)
+            _write_json(wd / "joins.json", st)
+            _write_json(self.render_file(book_id, chapter_id), ext)
+        self.run_align(book_id, chapter_id)
+        return len(fixes) + len(flips)
 
     def master_audio(self, book_id: str, part: dict, progress=None):
         """The part's recording, cleaned up (see enhance), made once and cached."""
