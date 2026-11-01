@@ -545,8 +545,9 @@ class Library:
     def run_render(self, book_id: str, chapter_id: str, check: str | set | None = "all",
                    progress=None) -> Path:
         """Render both editions of the chapter, then listen back to the joins
-        (`check`: "all", a set of join keys, or None) and rebuild any that come
-        out wrong. Returns the Extended edition's path."""
+        (`check`: "all", "new" for joins not yet heard, a set of join keys, or
+        None) and rebuild any that come out wrong. Returns the Extended
+        edition's path."""
         with _render_lock:
             book = self.book(book_id)
             ch = self.chapter(book, chapter_id)
@@ -607,7 +608,10 @@ class Library:
                     shutil.copyfile(self.output_path(book_id, chapter_id, same), out)
                     shutil.copyfile(self.render_file(book_id, chapter_id, same), render_file)
                     continue
-                only = None if check == "all" else set(check or ())
+                only = None if check in ("all", "new") else set(check or ())
+                heard = {}
+                if check == "new":  # what the last render heard still stands
+                    heard = {j["key"]: j["check"] for j in _read_json(render_file, {}).get("joins", []) if "check" in j}
                 for attempt in range(edit.MAX_LEVEL + 1):
                     span(0.4 * attempt / (edit.MAX_LEVEL + 1), "rendering")
                     samples, report = edit.render(audios, words, keep, levels(), marks, originals, intact, cut_after,
@@ -617,6 +621,8 @@ class Library:
                     edit.write_wav(samples, out)
                     if check is None:
                         break
+                    if attempt == 0 and heard:
+                        only = {j["key"] for j in report["joins"]} - heard.keys()
                     if attempt == 0 and checked:
                         # A join the other edition listened to is the same join.
                         new = {j["key"] for j in report["joins"]} - checked.keys()
@@ -639,8 +645,8 @@ class Library:
                     only = retry
                 keys |= {j["key"] for j in report["joins"]}
                 for j in report["joins"]:
-                    if j["key"] in checked:
-                        j["check"] = checked[j["key"]]
+                    if j["key"] in checked or j["key"] in heard:
+                        j["check"] = checked.get(j["key"], heard.get(j["key"]))
                 _write_json(render_file, {
                     **report, "edition": edition, "input_seconds": round(sum(durations), 2),
                     "output_seconds": round(len(samples) / edit.RATE, 2),

@@ -18,7 +18,7 @@ import traceback
 
 from flubcutter.library import Library
 
-KINDS = ("transcribe", "align", "judge", "render", "process")
+KINDS = ("transcribe", "align", "judge", "render", "ending", "process")
 # Stages where a render can run: the machine work is done.
 RENDERABLE = ("needs you", "not rendered", "out of date", "ready")
 
@@ -164,6 +164,8 @@ def run(lib: Library, job: dict, progress) -> None:
         _judge(lib, b, c, progress)
     elif job["kind"] == "render":
         _render(lib, b, c, progress)
+    elif job["kind"] == "ending":
+        lib.run_render(b, c, check="new", progress=progress)
     elif job["kind"] == "process":
         _process(lib, b, c, progress)
 
