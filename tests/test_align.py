@@ -101,3 +101,29 @@ def test_a_stutter_beside_a_misheard_name_is_cut():
     r = analyze(words_from(spoken), book)
     assert 3 in r["kept_words"]
     assert events_of(r, "restart", "extra") == [("restart", "to")]
+
+
+def test_talk_after_the_last_line_does_not_take_over_its_words():
+    book = "harry stared up at the dark roof listening to the pounding of the rain"
+    said = "harry stared up at the dark roof listening to the pounding the right that's true it's a half"
+    r = analyze(words_from(said.split()), book)
+    kept = [said.split()[i] for i in r["kept_words"]]
+    assert kept[-3:] == ["pounding", "the", "right"]
+    (e,) = [e for e in r["events"] if e["type"] == "extra"]
+    assert e["text"] == "that's true it's a half" and e["book_index"] == r["book_words"]
+
+
+def test_talk_after_a_dropped_last_word_is_all_extra():
+    book = "neither ron nor hermione answered him"
+    said = "neither ron nor hermione answered end of chapter twelve perfect"
+    r = analyze(words_from(said.split()), book)
+    assert [said.split()[i] for i in r["kept_words"]][-1] == "answered"
+    (e,) = [e for e in r["events"] if e["type"] == "extra"]
+    assert e["text"] == "end of chapter twelve perfect"
+
+
+def test_a_reread_last_line_still_keeps_the_last_take():
+    book = "and they all went home to bed"
+    said = "and they all went home to bed and they all went home to bed"
+    r = analyze(words_from(said.split()), book)
+    assert r["kept_words"][-1] == len(said.split()) - 1

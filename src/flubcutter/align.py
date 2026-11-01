@@ -266,19 +266,94 @@ def _rescue_strays(ops: list[tuple[str, int | None, int | None]], spoken: list[i
     return ops
 
 
+RETAKE_WORDS = 6  # stray words before a re-read ending; more than this is talk
+
+
+def _resembles(said: str, word: str) -> float:
+    """How much a misheard word looks like the book word: 0 if not at all."""
+    r = difflib.SequenceMatcher(None, said, word).ratio()
+    return r if (r >= 0.6 and abs(len(said) - len(word)) <= 1) or (r > 0.4 and said[:1] == word[:1]) else 0.0
+
+
+def _settle_ending(ops: list[tuple[str, int | None, int | None]], book: list[str], spoken: list[str],
+                   solid: int = 3) -> list[tuple[str, int | None, int | None]]:
+    """Talk after the last line can take over its words: book "the pounding of
+    the rain", spoken "the pounding the right. That's true. It's a half."
+    Pairing "of the rain" with "It's a half" costs the same as reading it where
+    it was said, and the traceback prefers the latest words. After the last
+    solid run of matches, the book's words go to the earliest speech that fits
+    them. Past the last match a word only stands in for a book word it looks
+    like ("the right" for "the rain"); the talk that follows is extra. An
+    ending read right after a few stray words is a retake, and the last take
+    wins as usual."""
+    k = len(ops)
+    while k > 0 and ops[k - 1][0] == MATCH:
+        k -= 1
+    if k < len(ops):
+        before = k
+        while before > 0 and ops[before - 1][0] == EXTRA:
+            before -= 1
+        if k - before <= RETAKE_WORDS:
+            return ops
+    k, run = len(ops), 0
+    while k > 0 and run < solid:
+        k -= 1
+        run = run + 1 if ops[k][0] == MATCH else 0
+    start = k + run if run == solid else 0
+    tail = ops[start:]
+    bs = [b for _, b, _ in tail if b is not None]
+    ss = [s for _, _, s in tail if s is not None]
+    if not bs or len(ss) - len(bs) < 2:  # no room for talk
+        return ops
+    B, S = [canon(book[b]) for b in bs], [canon(spoken[s]) for s in ss]
+    # Most matches possible, taking each at its earliest.
+    best = np.zeros((len(B) + 1, len(S) + 1), dtype=np.int32)
+    for i in range(len(B) - 1, -1, -1):
+        for j in range(len(S) - 1, -1, -1):
+            best[i, j] = max(best[i + 1, j], best[i, j + 1], best[i + 1, j + 1] + (B[i] == S[j]))
+    out = []
+    i, j, a, c = 0, 0, 0, 0
+    while a < len(B) and c < len(S):
+        if B[a] == S[c] and best[a, c] == best[a + 1, c + 1] + 1:
+            # Between two matches, words pair in order.
+            n = min(a - i, c - j)
+            out.extend((SUB, bs[i + x], ss[j + x]) for x in range(n))
+            out.extend((EXTRA, None, ss[x]) for x in range(j + n, c))
+            out.extend((MISSING, bs[x], None) for x in range(i + n, a))
+            out.append((MATCH, bs[a], ss[c]))
+            a, c = a + 1, c + 1
+            i, j = a, c
+        elif best[a, c + 1] == best[a, c]:
+            c += 1
+        else:
+            a += 1
+    # Past the last match.
+    for x in range(i, len(B)):
+        if j < len(S) and (score := _resembles(S[j], B[x])):
+            out.append((SUB, bs[x], ss[j]))
+            j += 1
+            if j < len(S) and _resembles(S[j - 1] + S[j], B[x]) > score:  # "her meal" for "Hermione"
+                out.append((SUB, bs[x], ss[j]))
+                j += 1
+        else:
+            out.append((MISSING, bs[x], None))
+    out.extend((EXTRA, None, ss[x]) for x in range(j, len(S)))
+    return ops[:start] + out
+
+
 def align_words(book: list[str], spoken: list[str]) -> list[tuple[str, int | None, int | None]]:
     vocab: dict[str, int] = {}
     b = [vocab.setdefault(canon(w), len(vocab)) for w in book]
     s = [vocab.setdefault(canon(w), len(vocab)) for w in spoken]
     if (len(b) + 1) * (len(s) + 1) <= MAX_CELLS:
-        return _sound_alike_swaps(_rescue_strays(_dp_align(b, s), s), book, spoken)
+        return _settle_ending(_sound_alike_swaps(_rescue_strays(_dp_align(b, s), s), book, spoken), book, spoken)
 
     ops = []
     bounds = [(0, 0)] + _anchors(b, s) + [(len(b), len(s))]
     for (i0, j0), (i1, j1) in zip(bounds, bounds[1:]):
         for kind, bi, sj in _dp_align(b[i0:i1], s[j0:j1]):
             ops.append((kind, None if bi is None else bi + i0, None if sj is None else sj + j0))
-    return _sound_alike_swaps(_rescue_strays(ops, s), book, spoken)
+    return _settle_ending(_sound_alike_swaps(_rescue_strays(ops, s), book, spoken), book, spoken)
 
 
 def _overlap(extra: list[str], text: list[str]) -> float:

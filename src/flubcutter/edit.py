@@ -43,6 +43,8 @@ MAX_PAUSE = 1.2    # longest silence allowed in the output, in seconds
 PARA_PAUSE = 2.0   # ... except at the end of a paragraph
 LEAD_IN = 0.3      # silence before the first word of the chapter
 END_TAIL = 0.8     # silence after the last word of the chapter
+END_PAUSE = 5.0    # room tone that lets a chapter's last line land (see render)
+END_FADE = 1.5     # that room tone's last seconds fade out
 HOP = 0.005        # loudness envelope resolution
 WIN = 0.02         # loudness envelope window
 XFADE = 0.02       # crossfade between pieces of room tone
@@ -463,7 +465,8 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
            levels: dict[str, int] | None = None,
            breaks: dict[int, str] | None = None,
            analysis: list[np.ndarray] | None = None,
-           intact: set[int] | None = None, cut_after: set[int] | None = None) -> tuple[np.ndarray, dict]:
+           intact: set[int] | None = None, cut_after: set[int] | None = None,
+           end_pause: float = END_PAUSE) -> tuple[np.ndarray, dict]:
     """The cleaned chapter, and a report of every run and join in it.
 
     breaks: sentence (".") and paragraph ("¶") ends and the edges of asides
@@ -604,6 +607,8 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
         e = A_out["t"] + tail[r]
         if r < len(rs) - 1 and A_out["hard"]:
             e += LEVELS[lvl[r]]["hard_fade"] / 2
+        elif r == len(rs) - 1 and end_pause and A_out["hard"]:
+            e += LEVELS[0]["hard_fade"] / 2
         s, e = max(0.0, s), min(ac(p).duration, e)
         piece = audios[p][int(s * RATE):int(e * RATE)].astype(np.float32)
         fade_in = int(LEVELS[lvl[r - 1]]["hard_fade"] * RATE) if r > 0 and A_in["hard"] else xf
@@ -619,8 +624,14 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
             n = fill[r] + (fo + fade_next) / RATE
             tone = ac(p).room_tone(A_out["t"], n)
             out = _xfade(out, tone, fo)
-    end_fade = min(len(out), int(0.05 * RATE))
-    if end_fade:
+    if end_pause:  # the last word, then the room carries on and fades away
+        A_out = sides[-1][1]
+        fo = int(LEVELS[0]["hard_fade"] * RATE) if A_out["hard"] else xf
+        tone = ac(words[rs[-1][1]]["part"]).room_tone(A_out["t"], end_pause - tail[-1] + fo / RATE)
+        fade = min(len(tone), int(END_FADE * RATE))
+        tone[-fade:] *= np.linspace(1.0, 0.0, fade, dtype=np.float32)
+        out = _xfade(out, tone, fo)
+    elif end_fade := min(len(out), int(0.05 * RATE)):
         out[-end_fade:] *= np.linspace(1.0, 0.0, end_fade, dtype=np.float32)
 
     joins = []

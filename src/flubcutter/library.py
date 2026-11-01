@@ -82,6 +82,11 @@ def slugify(text: str) -> str:
     return s[:48] or "untitled"
 
 
+def _after_the_book(event: dict, alignment: dict) -> bool:
+    """Was this said after the book's last word?"""
+    return bool(event.get("words")) and event.get("book_index", 0) >= alignment["book_words"]
+
+
 def _read_json(path: Path, default=None):
     try:
         return json.loads(path.read_text())
@@ -429,11 +434,12 @@ class Library:
         return out
 
     def edition_decisions(self, alignment: dict, review: dict, edition: str) -> dict[str, str]:
-        """The decisions one edition is rendered with: Plain cuts every aside."""
+        """The decisions one edition is rendered with: Plain cuts every aside,
+        and whatever was said after the book's last word."""
         out = self.effective_decisions(alignment, review)
         if edition == "plain":
             for e in alignment["events"]:
-                if self.kind(e, review) == "aside":
+                if self.kind(e, review) == "aside" or (e["id"] in out and _after_the_book(e, alignment)):
                     out[e["id"]] = "cut"
         return out
 
@@ -588,6 +594,10 @@ class Library:
                 marks = dict(breaks)
                 for e in asides:
                     marks[e["words"][0] - 1] = marks[e["words"][-1]] = "¶"
+                # A chapter that ends on talk ends as it was recorded; one that
+                # ends on the book gets its pause.
+                ends_on_talk = any(max(keep, default=-1) in e["words"] for e in a["events"] if _after_the_book(e, a))
+                end_pause = 0.0 if ends_on_talk else edit.END_PAUSE
                 out = self.output_path(book_id, chapter_id, edition)
                 render_file = self.render_file(book_id, chapter_id, edition)
                 same = next((e for e, k in kept.items() if k == (keep, cut_after, intact)), None)
@@ -600,7 +610,8 @@ class Library:
                 only = None if check == "all" else set(check or ())
                 for attempt in range(edit.MAX_LEVEL + 1):
                     span(0.4 * attempt / (edit.MAX_LEVEL + 1), "rendering")
-                    samples, report = edit.render(audios, words, keep, levels(), marks, originals, intact, cut_after)
+                    samples, report = edit.render(audios, words, keep, levels(), marks, originals, intact, cut_after,
+                                                  end_pause)
                     samples = enhance.loudness(samples)
                     out.parent.mkdir(parents=True, exist_ok=True)
                     edit.write_wav(samples, out)

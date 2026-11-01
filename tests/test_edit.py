@@ -76,7 +76,7 @@ def test_render_cuts_flub_and_paces_the_join_like_the_reader():
     ac = edit.Acoustics(out)
     loud = ac.db > ac.floor + 15
     assert np.count_nonzero(np.diff(loud.astype(int)) == 1) == 2
-    assert abs(len(out) / R - (edit.LEAD_IN + 0.4 + usual + 0.4 + edit.END_TAIL)) < 0.1
+    assert abs(len(out) / R - (edit.LEAD_IN + 0.4 + usual + 0.4 + edit.END_PAUSE)) < 0.1
     assert rep["pacing"] == []
 
 
@@ -315,3 +315,15 @@ def test_a_cut_noise_takes_the_yawn_out_of_the_pause():
     assert len(kept) / R - len(out) / R > 2.0
     (j,) = rep["joins"]
     assert j["kind"] == "pause" and j["pause"] < 1.2
+
+
+def test_a_chapter_ends_on_the_room_unless_it_ends_on_talk():
+    audio = recording([(1.0, 1.4), (2.0, 2.5)])
+    words = [W("a,", 1.0, 1.4), W("end.", 2.0, 2.5)]
+    paused, _ = edit.render([audio], words, {0, 1})
+    bare, _ = edit.render([audio], words, {0, 1}, end_pause=0.0)
+    assert len(paused) / R - len(bare) / R > edit.END_PAUSE - edit.END_TAIL - 0.1
+    # No sound in the pause: only the two words, and the room dies away at the very end.
+    ac = edit.Acoustics(paused)
+    assert np.count_nonzero(np.diff((ac.db > ac.floor + 15).astype(int)) == 1) == 2
+    assert np.abs(paused[-int(0.02 * R):]).max() < np.abs(paused[-int(2.5 * R):-int(2 * R)]).max() + 1e-6
