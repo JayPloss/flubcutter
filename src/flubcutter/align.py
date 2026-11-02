@@ -266,6 +266,8 @@ def _rescue_strays(ops: list[tuple[str, int | None, int | None]], spoken: list[i
     return ops
 
 
+STRAY_GAP = 3.0   # s from the reading to a last few "book" words that are really talk
+STRAY_WORDS = 3
 RETAKE_WORDS = 6  # stray words before a re-read ending; more than this is talk
 
 
@@ -341,6 +343,32 @@ def _settle_ending(ops: list[tuple[str, int | None, int | None]], book: list[str
     return ops[:start] + out
 
 
+def _drop_far_strays(ops: list[tuple[str, int | None, int | None]], book: list[str], spoken: list[str],
+                     words: list[dict], owner: list[int]) -> list[tuple[str, int | None, int | None]]:
+    """A common word in the talk can still pass for the book's: "the bottom"
+    ... eight seconds on ... "End of chapter", for "the bottom of her glass".
+    The last few words paired with the book, far from the reading before them
+    and short of its last word, are talk."""
+    ops = list(ops)
+    while True:
+        paired = [k for k, op in enumerate(ops) if op[0] in (MATCH, SUB)]
+        if not paired or ops[paired[-1]][1] == len(book) - 1 and ops[paired[-1]][0] == MATCH:
+            return ops
+        run = 1
+        while run < len(paired):
+            a, b = words[owner[ops[paired[-run - 1]][2]]], words[owner[ops[paired[-run]][2]]]
+            if a["part"] != b["part"] or b["start"] - a["end"] > STRAY_GAP:
+                break
+            run += 1
+        if run > STRAY_WORDS or run == len(paired):
+            return ops
+        strays = paired[-run:]
+        tail = [(MISSING, ops[k][1], None) for k in strays]
+        extra = [(EXTRA, None, ops[k][2]) for k in strays]
+        rest = [op for k, op in enumerate(ops[strays[0]:], strays[0]) if k not in strays]
+        ops = ops[:strays[0]] + tail + sorted(rest + extra, key=lambda op: (op[2] is None, op[2] or 0))
+
+
 def align_words(book: list[str], spoken: list[str]) -> list[tuple[str, int | None, int | None]]:
     vocab: dict[str, int] = {}
     b = [vocab.setdefault(canon(w), len(vocab)) for w in book]
@@ -374,7 +402,7 @@ def analyze(words: list[dict], book_text: str) -> dict:
                 owner.append(idx)
 
     book = normalize(book_text)
-    ops = align_words(book, flat)
+    ops = _drop_far_strays(align_words(book, flat), book, flat, words, owner)
 
     events = []
     kept = []

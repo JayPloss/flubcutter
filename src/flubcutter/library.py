@@ -37,6 +37,7 @@ SURE = 0.8
 # aside (unscripted talk: a conversation with the kids, an explanation, a
 # joke) taken out. Extended: the story with the asides that were kept.
 EDITIONS = ("extended", "plain")
+HEAR_ENDING = 6.0  # s listened to after the last word kept (see hear_ending)
 KINDS = ("flub", "aside")
 
 
@@ -703,26 +704,77 @@ class Library:
             _write_json(wd / "relisten.json", log)
             if not fixes:
                 return len(flips)
-            transcripts = self.transcripts(book_id, ch)
-            base = [0]
-            for t in transcripts:
-                base.append(base[-1] + len((t or {}).get("words", [])))
-            st = self.joins_state(book_id, chapter_id)
-            ext = _read_json(self.render_file(book_id, chapter_id), {})
-            # Back to front, so each fix's word indices are still right.
-            for f in sorted(fixes, key=lambda f: -f["first"]):
-                local = f["first"] - base[f["part"]]
-                transcripts[f["part"]]["words"][local:local + f["count"]] = f["words"]
-                move = lambda d: {relisten.shift_key(k, f["first"], f["count"], len(f["words"])): v
-                                  for k, v in d.items()}
-                st["levels"], st["verdicts"] = move(st["levels"]), move(st["verdicts"])
-                ext["auto_levels"] = move(ext.get("auto_levels", {}))
-            for p, t in zip(ch["parts"], transcripts):
-                _write_json(self.transcript_path(book_id, chapter_id, p["id"]), t)
-            _write_json(wd / "joins.json", st)
-            _write_json(self.render_file(book_id, chapter_id), ext)
+            self._apply_word_fixes(book_id, chapter_id, ch, fixes)
         self.run_align(book_id, chapter_id)
         return len(fixes) + len(flips)
+
+    def hear_ending(self, book_id: str, chapter_id: str) -> bool:
+        """The transcriber sometimes loses a chapter's last word in the talk
+        that follows ("Even chapter 7" for "even worse. Chapter 7"), and the
+        render would then stop short of it. Listen again to just the seconds
+        after the last kept word: a short clip is heard better. Returns whether
+        the word was found and written into the transcript."""
+        from flubcutter.transcribe import transcribe
+
+        a = self.alignment(book_id, chapter_id)
+        if a is None or not a["kept_words"]:
+            return False
+        last_book = align.normalize(self.chapter_text(book_id, chapter_id))[-1]
+        if not any(e["type"] == "missing" and e["book_index"] == a["book_words"] - 1 for e in a["events"]):
+            return False
+        ch = self.chapter(self.book(book_id), chapter_id)
+        words = self.chapter_words(book_id, ch)
+        k = a["kept_words"][-1]
+        part, t0 = words[k]["part"], words[k]["end"]
+        audio = edit.load(self.part_audio(book_id, ch["parts"][part]))
+        with tempfile.TemporaryDirectory() as d:
+            clip = Path(d) / "ending.wav"
+            edit.write_wav(audio[int(max(0.0, t0 - 0.2) * edit.RATE):int((t0 + HEAR_ENDING) * edit.RATE)], clip)
+            heard = transcribe(clip)["words"]
+        off = max(0.0, t0 - 0.2)
+        heard = [dict(w, start=round(w["start"] + off, 3), end=round(w["end"] + off, 3), heard_again=True)
+                 for w in heard if w["start"] + off > t0 - 0.05]
+        toks = [align.canon("".join(align.normalize(w["word"]))) for w in heard]
+        want = align.canon(last_book)
+        found = None
+        for i, t in enumerate(toks):
+            if t == want or align._resembles(t, want):
+                found = i
+                break
+            if i and align._resembles(toks[i - 1] + t, want):  # "the Melza" for "Demelza"
+                found = i
+                break
+        if found is None:
+            return False
+        end = heard[found]["end"]
+        replaced = [i for i in range(k + 1, len(words)) if words[i]["part"] == part and words[i]["start"] < end]
+        with _lock:
+            self._apply_word_fixes(book_id, chapter_id, ch, [{
+                "first": k + 1, "count": len(replaced), "part": part, "words": heard[:found + 1]}])
+        self.run_align(book_id, chapter_id)
+        return True
+
+    def _apply_word_fixes(self, book_id: str, chapter_id: str, ch: dict, fixes: list[dict]) -> None:
+        """Write heard words into the transcripts, moving what's keyed by word index."""
+        wd = self.work_dir(book_id, chapter_id)
+        transcripts = self.transcripts(book_id, ch)
+        base = [0]
+        for t in transcripts:
+            base.append(base[-1] + len((t or {}).get("words", [])))
+        st = self.joins_state(book_id, chapter_id)
+        ext = _read_json(self.render_file(book_id, chapter_id), {})
+        # Back to front, so each fix's word indices are still right.
+        for f in sorted(fixes, key=lambda f: -f["first"]):
+            local = f["first"] - base[f["part"]]
+            transcripts[f["part"]]["words"][local:local + f["count"]] = f["words"]
+            move = lambda d: {relisten.shift_key(k, f["first"], f["count"], len(f["words"])): v
+                              for k, v in d.items()}
+            st["levels"], st["verdicts"] = move(st["levels"]), move(st["verdicts"])
+            ext["auto_levels"] = move(ext.get("auto_levels", {}))
+        for p, t in zip(ch["parts"], transcripts):
+            _write_json(self.transcript_path(book_id, chapter_id, p["id"]), t)
+        _write_json(wd / "joins.json", st)
+        _write_json(self.render_file(book_id, chapter_id), ext)
 
     def master_audio(self, book_id: str, part: dict, progress=None):
         """The part's recording, cleaned up (see enhance), made once and cached."""

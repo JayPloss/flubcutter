@@ -127,3 +127,24 @@ def test_a_reread_last_line_still_keeps_the_last_take():
     said = "and they all went home to bed and they all went home to bed"
     r = analyze(words_from(said.split()), book)
     assert r["kept_words"][-1] == len(said.split()) - 1
+
+
+def test_a_common_word_in_the_talk_does_not_pass_for_the_book():
+    book = "she drained it from the bottom of her glass"
+    said = "she drained it from the bottom end of chapter twenty five"
+    w = words_from(said.split())
+    for x in w[6:]:
+        x["start"] += 8
+        x["end"] += 8
+    r = analyze(w, book)
+    assert said.split()[r["kept_words"][-1]] == "bottom"
+
+
+def test_the_last_word_read_after_a_pause_is_kept():
+    book = "and that was the end"
+    said = "and that was the end"
+    w = words_from(said.split())
+    w[4]["start"] += 5
+    w[4]["end"] += 5
+    r = analyze(w, book)
+    assert r["kept_words"][-1] == 4

@@ -61,3 +61,26 @@ def test_glitch_away_from_any_cut_changes_nothing(tmp_path):
     assert r["joins"] == [] and r["fixed"] == []
     assert lib.render_info(b, c)["rendered"] == before
     assert lib.status(b, lib.chapter(lib.book(b), c))["rendered"]
+
+
+def test_a_lost_last_word_is_heard_again(tmp_path, monkeypatch):
+    lib = Library(tmp_path)
+    book = lib.create_book("Test")
+    ch = lib.add_chapter(book["id"], "One", "zero one two even worse")
+    rec = lib.book_dir(book["id"]) / "audio" / "rec.wav"
+    edit.write_wav(np.zeros(9 * R, dtype=np.float32), rec)
+    part = lib.add_part(book["id"], ch["id"], "audio/rec.wav")
+    said = [("zero", 0.5, 0.9), ("one", 1.0, 1.4), ("two", 1.5, 1.9), ("even", 2.0, 2.4), ("chapter", 2.6, 3.0), ("seven", 3.5, 4.0), ("next", 4.1, 4.4), ("one", 4.5, 4.8)]
+    path = lib.transcript_path(book["id"], ch["id"], part["id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"audio": str(rec), "duration": 9.0, "words": [
+        {"word": w, "start": s, "end": e, "prob": 1.0} for w, s, e in said]}))
+    lib.run_align(book["id"], ch["id"])
+    assert any(e["type"] == "missing" and e["book"] == "worse" for e in lib.alignment(book["id"], ch["id"])["events"])
+    monkeypatch.setattr("flubcutter.transcribe.transcribe", lambda clip: {"words": [
+        {"word": "worse.", "start": 0.3, "end": 0.7, "prob": 1.0},
+        {"word": "chapter", "start": 1.0, "end": 1.4, "prob": 1.0}]})
+    assert lib.hear_ending(book["id"], ch["id"])
+    a = lib.alignment(book["id"], ch["id"])
+    words = lib.chapter_words(book["id"], lib.chapter(lib.book(book["id"]), ch["id"]))
+    assert words[a["kept_words"][-1]]["word"] == "worse."

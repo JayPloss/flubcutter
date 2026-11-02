@@ -222,6 +222,7 @@ def _process(lib, b, c, progress):
     a = lib.alignment(b, c)
     if a is None or not a.get("noise_checked"):  # aligned before noises were found
         lib.run_align(b, c)
+    lib.hear_ending(b, c)
     if judge.available():
         progress(0.9, "AI judging")
         _judge(lib, b, c, lambda f: progress(0.9 + 0.1 * f, "AI judging"))
