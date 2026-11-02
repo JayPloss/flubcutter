@@ -37,7 +37,7 @@ SURE = 0.8
 # aside (unscripted talk: a conversation with the kids, an explanation, a
 # joke) taken out. Extended: the story with the asides that were kept.
 EDITIONS = ("extended", "plain")
-HEAR_ENDING = 6.0  # s listened to after the last word kept (see hear_ending)
+HEAR_LEAD, HEAR_ENDING = 3.0, 4.0  # s listened to before and after the last word kept (see hear_ending)
 KINDS = ("flub", "aside")
 
 
@@ -712,8 +712,8 @@ class Library:
         """The transcriber sometimes loses a chapter's last word in the talk
         that follows ("Even chapter 7" for "even worse. Chapter 7"), and the
         render would then stop short of it. Listen again to just the seconds
-        after the last kept word: a short clip is heard better. Returns whether
-        the word was found and written into the transcript."""
+        around the last kept word: a short clip is heard better. Returns
+        whether the word was found and written into the transcript."""
         from flubcutter.transcribe import transcribe
 
         a = self.alignment(book_id, chapter_id)
@@ -729,19 +729,17 @@ class Library:
         audio = edit.load(self.part_audio(book_id, ch["parts"][part]))
         with tempfile.TemporaryDirectory() as d:
             clip = Path(d) / "ending.wav"
-            edit.write_wav(audio[int(max(0.0, t0 - 0.2) * edit.RATE):int((t0 + HEAR_ENDING) * edit.RATE)], clip)
+            off = max(0.0, t0 - HEAR_LEAD)  # a run-up: it hears a word badly right at the edge of a clip
+            edit.write_wav(audio[int(off * edit.RATE):int((t0 + HEAR_ENDING) * edit.RATE)], clip)
             heard = transcribe(clip)["words"]
-        off = max(0.0, t0 - 0.2)
         heard = [dict(w, start=round(w["start"] + off, 3), end=round(w["end"] + off, 3), heard_again=True)
                  for w in heard if w["start"] + off > t0 - 0.05]
         toks = [align.canon("".join(align.normalize(w["word"]))) for w in heard]
         want = align.canon(last_book)
         found = None
         for i, t in enumerate(toks):
-            if t == want or align._resembles(t, want):
-                found = i
-                break
-            if i and align._resembles(toks[i - 1] + t, want):  # "the Melza" for "Demelza"
+            if t == want or (len(want) > 3 and (align._resembles(t, want) or (
+                    i and align._resembles(toks[i - 1] + t, want)))):  # "the Melza" for "Demelza"
                 found = i
                 break
         if found is None:

@@ -78,8 +78,9 @@ def test_a_lost_last_word_is_heard_again(tmp_path, monkeypatch):
     lib.run_align(book["id"], ch["id"])
     assert any(e["type"] == "missing" and e["book"] == "worse" for e in lib.alignment(book["id"], ch["id"])["events"])
     monkeypatch.setattr("flubcutter.transcribe.transcribe", lambda clip: {"words": [
-        {"word": "worse.", "start": 0.3, "end": 0.7, "prob": 1.0},
-        {"word": "chapter", "start": 1.0, "end": 1.4, "prob": 1.0}]})
+        {"word": "even", "start": 2.0, "end": 2.4, "prob": 1.0},
+        {"word": "worse.", "start": 2.5, "end": 2.8, "prob": 1.0},
+        {"word": "chapter", "start": 3.0, "end": 3.4, "prob": 1.0}]})
     assert lib.hear_ending(book["id"], ch["id"])
     a = lib.alignment(book["id"], ch["id"])
     words = lib.chapter_words(book["id"], lib.chapter(lib.book(book["id"]), ch["id"]))
