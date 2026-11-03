@@ -123,6 +123,10 @@ def load(path: Path, rate: int = RATE) -> np.ndarray:
 
 # ---------- acoustics ----------
 
+ASSEMBLE_TAIL = 10 * RATE  # samples kept open while joining; far more than any crossfade
+ENVELOPE_BLOCK = 50_000  # envelope frames worked out at a time
+
+
 class Acoustics:
     """Loudness envelope of one recording, relative to its own noise floor.
 
@@ -154,9 +158,15 @@ class Acoustics:
     def _envelope(x: np.ndarray) -> np.ndarray:
         hop, win = int(HOP * RATE), int(WIN * RATE)
         n = max(1, (len(x) - win) // hop + 1)
-        c = np.concatenate([[0.0], np.cumsum(x.astype(np.float64) ** 2)])
         starts = np.minimum(np.arange(n) * hop, max(0, len(x) - win))
-        energy = (c[np.minimum(starts + win, len(x))] - c[starts]) / win
+        energy = np.empty(n)
+        # A block at a time: a running sum over a whole chapter at 48 kHz, in
+        # doubles, would hold gigabytes per hour of audio.
+        for a in range(0, n, ENVELOPE_BLOCK):
+            b = min(a + ENVELOPE_BLOCK, n)
+            lo, hi = starts[a], min(starts[b - 1] + win, len(x))
+            c = np.concatenate([[0.0], np.cumsum(x[lo:hi].astype(np.float64) ** 2)])
+            energy[a:b] = (c[np.minimum(starts[a:b] + win, len(x)) - lo] - c[starts[a:b] - lo]) / win
         return 10 * np.log10(energy + 1e-12)
 
     def k(self, t: float) -> int:
@@ -593,6 +603,7 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
     # Assemble.
     xf = int(XFADE * RATE)
     out = np.zeros(0, dtype=np.float32)
+    done, done_n = [], 0  # finished audio; `out` is only the tail still being joined
     chunks, run_pos = [], []
     lead = LEAD_IN - head[0]
     if lead > 0.02:
@@ -612,7 +623,7 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
         s, e = max(0.0, s), min(ac(p).duration, e)
         piece = audios[p][int(s * RATE):int(e * RATE)].astype(np.float32)
         fade_in = int(LEVELS[lvl[r - 1]]["hard_fade"] * RATE) if r > 0 and A_in["hard"] else xf
-        start_out = len(out) - (min(fade_in, len(out), len(piece)) if len(out) else 0)
+        start_out = done_n + len(out) - (min(fade_in, len(out), len(piece)) if len(out) else 0)
         out = _xfade(out, piece, fade_in) if len(out) else piece.copy()
         run_pos.append(start_out / RATE - s)  # output time = source time + offset
         chunks.append({"part": p, "start": round(s, 3), "end": round(e, 3), "at": round(start_out / RATE, 3)})
@@ -624,6 +635,12 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
             n = fill[r] + (fo + fade_next) / RATE
             tone = ac(p).room_tone(A_out["t"], n)
             out = _xfade(out, tone, fo)
+            # A crossfade reaches back a fraction of a second, so all but the
+            # last stretch is final; joining onto it each time would copy it all.
+            if len(out) > 2 * ASSEMBLE_TAIL:
+                done.append(out[:-ASSEMBLE_TAIL].copy())
+                done_n += len(done[-1])
+                out = out[-ASSEMBLE_TAIL:].copy()
     if end_pause:  # the last word, then the room carries on and fades away
         A_out = sides[-1][1]
         fo = int(LEVELS[0]["hard_fade"] * RATE) if A_out["hard"] else xf
@@ -633,6 +650,9 @@ def render(audios: list[np.ndarray], words: list[dict], keep: set[int],
         out = _xfade(out, tone, fo)
     elif end_fade := min(len(out), int(0.05 * RATE)):
         out[-end_fade:] *= np.linspace(1.0, 0.0, end_fade, dtype=np.float32)
+    done.append(out)
+    out = np.concatenate(done)
+    del done
 
     joins = []
     for r in range(len(rs) - 1):

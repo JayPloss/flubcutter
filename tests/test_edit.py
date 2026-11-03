@@ -327,3 +327,31 @@ def test_a_chapter_ends_on_the_room_unless_it_ends_on_talk():
     ac = edit.Acoustics(paused)
     assert np.count_nonzero(np.diff((ac.db > ac.floor + 15).astype(int)) == 1) == 2
     assert np.abs(paused[-int(0.02 * R):]).max() < np.abs(paused[-int(2.5 * R):-int(2 * R)]).max() + 1e-6
+
+
+def test_envelope_in_blocks_matches_a_running_sum_over_everything():
+    rng = np.random.default_rng(1)
+    x = (rng.normal(size=int(edit.RATE * 700)) * 0.1).astype(np.float32)
+    hop, win = int(edit.HOP * edit.RATE), int(edit.WIN * edit.RATE)
+    n = (len(x) - win) // hop + 1
+    assert n > edit.ENVELOPE_BLOCK  # crosses a block edge
+    c = np.concatenate([[0.0], np.cumsum(x.astype(np.float64) ** 2)])
+    starts = np.arange(n) * hop
+    whole = 10 * np.log10((c[starts + win] - c[starts]) / win + 1e-12)
+    assert np.allclose(edit.Acoustics._envelope(x), whole, atol=1e-6)
+    short = x[:win // 2]  # shorter than one window
+    assert len(edit.Acoustics._envelope(short)) == 1
+
+
+def test_a_long_chapter_comes_out_the_same_when_assembled_a_stretch_at_a_time(monkeypatch):
+    spans = [(1.0 + 2 * i, 1.5 + 2 * i) for i in range(60)]
+    audio = recording(spans)
+    words = [W(f"w{i}", a, b) for i, (a, b) in enumerate(spans)]
+    keep = {i for i in range(60) if i % 3}
+    monkeypatch.setattr(edit, "ASSEMBLE_TAIL", 10 * R)
+    assert len(audio) > 4 * edit.ASSEMBLE_TAIL
+    parts, rep = edit.render([audio], words, keep)
+    monkeypatch.setattr(edit, "ASSEMBLE_TAIL", 10 ** 9)  # never set anything aside
+    whole, rep2 = edit.render([audio], words, keep)
+    assert np.array_equal(parts, whole)
+    assert rep["chunks"] == rep2["chunks"] and rep["joins"] == rep2["joins"]
