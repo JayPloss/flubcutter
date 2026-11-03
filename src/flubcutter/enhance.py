@@ -173,14 +173,17 @@ def denoise(audio: np.ndarray, atten_db: float = MAX_ATTEN_DB, workers: int | No
 
 def _ffmpeg(audio: np.ndarray, filters: str, capture_log: bool = False):
     """Run mono float audio through an ffmpeg filter chain at RATE."""
+    # Handed over without a copy; a run only for its log throws its audio away,
+    # so a whole chapter isn't held twice more just to read a number.
+    output = ["-f", "null", "-"] if capture_log else ["-f", "f32le", "-ac", "1", "-ar", str(RATE), "-"]
     p = subprocess.run(
         ["ffmpeg", "-nostdin", "-hide_banner", "-v", "info" if capture_log else "error",
-         "-f", "f32le", "-ac", "1", "-ar", str(RATE), "-i", "-",
-         "-af", filters, "-f", "f32le", "-ac", "1", "-ar", str(RATE), "-"],
-        input=np.asarray(audio, dtype="<f4").tobytes(), check=True, capture_output=True,
+         "-f", "f32le", "-ac", "1", "-ar", str(RATE), "-i", "-", "-af", filters, *output],
+        input=memoryview(np.asarray(audio, dtype="<f4")).cast("B"), check=True, capture_output=True,
     )
-    out = np.frombuffer(p.stdout, dtype=np.float32)
-    return (out, p.stderr.decode(errors="replace")) if capture_log else out
+    if capture_log:
+        return None, p.stderr.decode(errors="replace")
+    return np.frombuffer(p.stdout, dtype=np.float32)
 
 
 def speech_level(audio: np.ndarray) -> float:
